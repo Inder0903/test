@@ -1,6 +1,6 @@
 -- ═══════════════════════════════════════════════════════════
--- ANIME STARS SCRIPT v1.7
--- Full Auto Quest Loop + Difficulty Filter + Auto Claim
+-- ANIME STARS SCRIPT v2.1
+-- Fixed: Group centering + Hide UI order + Efficient loops
 -- ═══════════════════════════════════════════════════════════
 
 local repo = "https://raw.githubusercontent.com/deividcomsono/Obsidian/main/"
@@ -20,10 +20,15 @@ local VirtualUser = game:GetService("VirtualUser")
 local LocalPlayer = Players.LocalPlayer
 local Remote = ReplicatedStorage.Shared.Packages.Events.RemoteEvent
 
--- HARDCODED SETTINGS
 local ATTACK_DELAY = 0.05
 local ATTACK_RANGE = 2000
 local HOVER_DISTANCE = 5
+
+-- ANTI-AFK
+LocalPlayer.Idled:Connect(function()
+    VirtualUser:CaptureController()
+    VirtualUser:ClickButton2(Vector2.new())
+end)
 
 -- ═══════════════════════════════════════════════════════════
 -- DATA
@@ -63,31 +68,20 @@ local function GetChampionsByZone()
 end
 
 local ZoneDisplayNames = {
-    lobby = "Lobby",
-    desertvillage = "Desert Village",
-    skylands = "Skylands",
-    alienplanet = "Alien Planet",
-    kingdomoflions = "Kingdom of Lions",
-    kazekageroom = "Kazekage Room",
-    exclusive = "Exclusive",
-    none = "Global",
+    lobby = "Lobby", desertvillage = "Desert Village",
+    skylands = "Skylands", alienplanet = "Alien Planet",
+    kingdomoflions = "Kingdom of Lions", kazekageroom = "Kazekage Room",
+    exclusive = "Exclusive", none = "Global",
 }
 
 local ZoneAliases = {
-    ["shinobi world"] = "desertvillage",
-    ["shinobi"] = "desertvillage",
-    ["desert village"] = "desertvillage",
-    ["desert"] = "desertvillage",
-    ["skylands"] = "skylands",
-    ["skypiea"] = "skylands",
-    ["alien planet"] = "alienplanet",
-    ["namekian world"] = "alienplanet",
-    ["namekian"] = "alienplanet",
-    ["alien"] = "alienplanet",
-    ["kingdom of lions"] = "kingdomoflions",
-    ["lions"] = "kingdomoflions",
-    ["kazekage"] = "kazekageroom",
-    ["lobby"] = "lobby",
+    ["shinobi world"]="desertvillage",["shinobi"]="desertvillage",
+    ["desert village"]="desertvillage",["desert"]="desertvillage",
+    ["skylands"]="skylands",["skypiea"]="skylands",
+    ["alien planet"]="alienplanet",["namekian world"]="alienplanet",
+    ["namekian"]="alienplanet",["alien"]="alienplanet",
+    ["kingdom of lions"]="kingdomoflions",["lions"]="kingdomoflions",
+    ["kazekage"]="kazekageroom",["lobby"]="lobby",
 }
 
 local EnemiesByZone = GetEnemiesByZone()
@@ -116,8 +110,11 @@ for id, name in pairs(ZoneDisplayNames) do
     ZoneNameToId[name] = id
 end
 
+local ChampionSpinZones = {"desertvillage", "skylands", "alienplanet", "kingdomoflions"}
+local ChampionSpinDisplay = {"Desert Village", "Skylands", "Alien Planet", "Kingdom of Lions"}
+
 -- ═══════════════════════════════════════════════════════════
--- MOB TARGETING (with difficulty filter)
+-- MOB INFO + FILTERING
 -- ═══════════════════════════════════════════════════════════
 local function GetMobInfo(mobModel)
     for _, gui in ipairs(LocalPlayer.PlayerGui:GetChildren()) do
@@ -155,55 +152,93 @@ end
 local function MatchesFilter(mobModel, filter)
     if not filter then return true end
     local info = GetMobInfo(mobModel)
-    
-    -- Filter by specific mob name
     if filter.mobName and info.name then
         return info.name:lower() == filter.mobName:lower()
     end
-    
-    -- Filter by difficulty
     if filter.difficulty then
         local wanted = NormDiff(filter.difficulty)
         local actual = NormDiff(info.difficulty)
         if wanted == "boss" then
-            -- Boss = "Boss" difficulty OR any champion
             if actual == "boss" then return true end
             if info.name and IsChampion(info.name) then return true end
             return false
         end
         return actual == wanted
     end
-    
     return true
 end
 
-local function GetTargetMob(filter)
+local function GetAllMatchingMobs(filter)
     local char = LocalPlayer.Character
-    if not char then return nil end
+    if not char then return {} end
     local hrp = char:FindFirstChild("HumanoidRootPart")
-    if not hrp then return nil end
+    if not hrp then return {} end
     
     local enemies = Workspace:FindFirstChild("Enemies")
-    if not enemies then return nil end
+    if not enemies then return {} end
     
-    local closest, closestDist = nil, ATTACK_RANGE
-    
+    local mobs = {}
     for _, mob in ipairs(enemies:GetChildren()) do
         local mobHrp = mob:FindFirstChild("HumanoidRootPart")
         local hum = mob:FindFirstChildOfClass("Humanoid")
         if mobHrp and hum and hum.Health > 0 then
             local dist = (hrp.Position - mobHrp.Position).Magnitude
-            if dist < closestDist and MatchesFilter(mob, filter) then
-                closest = mob
-                closestDist = dist
+            if dist < ATTACK_RANGE and MatchesFilter(mob, filter) then
+                table.insert(mobs, {mob = mob, hrp = mobHrp, dist = dist})
             end
         end
     end
-    return closest
+    
+    table.sort(mobs, function(a, b) return a.dist < b.dist end)
+    return mobs
+end
+
+local function GetSingleTarget(filter)
+    local mobs = GetAllMatchingMobs(filter)
+    return mobs[1] and mobs[1].mob or nil
+end
+
+-- Returns: primary mob, group members list, center position
+local function GetMobGroup(filter, groupRadius)
+    groupRadius = groupRadius or 25
+    local allMobs = GetAllMatchingMobs(filter)
+    if #allMobs == 0 then return nil, nil, nil end
+    
+    local bestGroup = nil
+    local bestScore = 0
+    
+    -- Try each mob as an anchor, find best cluster
+    for _, anchor in ipairs(allMobs) do
+        local group = {anchor}
+        for _, other in ipairs(allMobs) do
+            if other.mob ~= anchor.mob then
+                local d = (anchor.hrp.Position - other.hrp.Position).Magnitude
+                if d <= groupRadius then
+                    table.insert(group, other)
+                end
+            end
+        end
+        local score = #group * 1000 - anchor.dist
+        if score > bestScore then
+            bestScore = score
+            bestGroup = group
+        end
+    end
+    
+    if not bestGroup or #bestGroup == 0 then return nil, nil, nil end
+    
+    -- Center = average of all group positions
+    local sum = Vector3.zero
+    for _, m in ipairs(bestGroup) do
+        sum = sum + m.hrp.Position
+    end
+    local center = sum / #bestGroup
+    
+    return bestGroup[1].mob, bestGroup, center
 end
 
 -- ═══════════════════════════════════════════════════════════
--- REMOTE ACTIONS
+-- REMOTES
 -- ═══════════════════════════════════════════════════════════
 local Actions = {}
 function Actions.M1(hero, combo)
@@ -218,6 +253,34 @@ end
 function Actions.Teleport(zoneId)
     Remote:FireServer({{Path = "zones/teleport", Params = {zoneId}}})
 end
+function Actions.ChampionSpin(zoneId)
+    Remote:FireServer({{Path = "champions/spin", Params = {"auto", zoneId}}})
+end
+function Actions.GachaSpin(gachaName)
+    Remote:FireServer({{Path = "gacha/spin", Params = {gachaName, "auto"}}})
+end
+function Actions.GachaStop(gachaName)
+    Remote:FireServer({{Path = "gacha/stopAuto", Params = {gachaName}}})
+end
+function Actions.GachaHide(gachaName, hidden)
+    Remote:FireServer({{Path = "gacha/setHidden", Params = {gachaName, hidden}}})
+end
+function Actions.RankupPower()
+    Remote:FireServer({{Path = "rankup/power", Params = {}}})
+end
+
+-- Combined: hide UI FIRST, wait, then spin
+function Actions.HiddenSpin(gachaName)
+    Remote:FireServer({{Path = "gacha/setHidden", Params = {gachaName, true}}})
+    task.wait(0.1)
+    Remote:FireServer({{Path = "gacha/spin", Params = {gachaName, "auto"}}})
+end
+
+function Actions.HiddenChampionSpin(zoneId)
+    Remote:FireServer({{Path = "gacha/setHidden", Params = {"Champions", true}}})
+    task.wait(0.1)
+    Remote:FireServer({{Path = "champions/spin", Params = {"auto", zoneId}}})
+end
 
 local function GetCurrentHero()
     local char = LocalPlayer.Character
@@ -229,7 +292,7 @@ local function GetCurrentHero()
 end
 
 -- ═══════════════════════════════════════════════════════════
--- QUEST READER + PARSER
+-- QUEST
 -- ═══════════════════════════════════════════════════════════
 local function GetActiveQuest()
     local pg = LocalPlayer:FindFirstChild("PlayerGui")
@@ -254,39 +317,21 @@ local function GetActiveQuest()
     local canClaim = claim and claim.Visible or false
     
     if title == "" then return nil end
-    
-    return {
-        title = title,
-        progress = prog,
-        canClaim = canClaim,
-        claimButton = claimBtn,
-    }
+    return {title=title, progress=prog, canClaim=canClaim, claimButton=claimBtn}
 end
 
 local DIFFICULTY_KEYWORDS = {
-    ["ultra hard"] = "ultrahard",
-    ["ultra"] = "ultrahard",
-    ["hard"] = "hard",
-    ["medium"] = "medium",
-    ["easy"] = "easy",
-    ["boss"] = "boss",
-    ["champion"] = "boss",
+    ["ultra hard"]="ultrahard",["ultra"]="ultrahard",
+    ["hard"]="hard",["medium"]="medium",["easy"]="easy",
+    ["boss"]="boss",["champion"]="boss",
 }
 
 local function ParseQuest(questText)
     if not questText or questText == "" then return nil end
     local lower = questText:lower()
+    local result = {text=questText, zone=nil, zoneId=nil, difficulty=nil, mobName=nil}
     
-    local result = {
-        text = questText,
-        zone = nil,
-        zoneId = nil,
-        difficulty = nil,
-        mobName = nil,
-    }
-    
-    -- Detect difficulty (longest match first)
-    local diffOrder = {"ultra hard", "ultra", "hard", "medium", "easy", "boss", "champion"}
+    local diffOrder = {"ultra hard","ultra","hard","medium","easy","boss","champion"}
     for _, keyword in ipairs(diffOrder) do
         if lower:find(keyword, 1, true) then
             result.difficulty = DIFFICULTY_KEYWORDS[keyword]
@@ -294,13 +339,11 @@ local function ParseQuest(questText)
         end
     end
     
-    -- Detect zone (longest alias first)
     local sortedAliases = {}
     for alias, zoneId in pairs(ZoneAliases) do
-        table.insert(sortedAliases, {alias = alias, zoneId = zoneId, len = #alias})
+        table.insert(sortedAliases, {alias=alias, zoneId=zoneId, len=#alias})
     end
-    table.sort(sortedAliases, function(a, b) return a.len > b.len end)
-    
+    table.sort(sortedAliases, function(a,b) return a.len > b.len end)
     for _, a in ipairs(sortedAliases) do
         if lower:find(a.alias, 1, true) then
             result.zoneId = a.zoneId
@@ -309,7 +352,6 @@ local function ParseQuest(questText)
         end
     end
     
-    -- Detect specific mob name
     for _, mobList in pairs(EnemiesByZone) do
         for _, mobName in ipairs(mobList) do
             if lower:find(mobName:lower(), 1, true) then
@@ -332,13 +374,9 @@ local function ParseQuest(questText)
     return result
 end
 
--- Detect current zone (by teleport tracking)
-local currentZone = "lobby"
-
 local function ClickClaimButton()
     local q = GetActiveQuest()
     if q and q.canClaim and q.claimButton then
-        -- Try multiple methods
         local btn = q.claimButton
         pcall(function()
             if firesignal then
@@ -346,10 +384,6 @@ local function ClickClaimButton()
                 firesignal(btn.Activated)
             end
         end)
-        pcall(function()
-            btn:CaptureFocus()
-        end)
-        -- VirtualInput fallback
         pcall(function()
             local pos = btn.AbsolutePosition + btn.AbsoluteSize/2
             VirtualUser:Button1Down(pos)
@@ -369,7 +403,7 @@ Library.ShowToggleFrameInKeybinds = true
 
 local Window = Library:CreateWindow({
     Title = "Anime Stars",
-    Footer = "v1.7",
+    Footer = "v2.1",
     Icon = 95816097006870,
     NotifySide = "Right",
     ShowCustomCursor = true,
@@ -379,14 +413,16 @@ local Tabs = {
     Main = Window:AddTab("Main", "user"),
     Farm = Window:AddTab("Auto Farm", "swords"),
     Quest = Window:AddTab("Auto Quest", "scroll-text"),
+    Extras = Window:AddTab("Auto Extras", "sparkles"),
     Teleport = Window:AddTab("Teleports", "map"),
     ["UI Settings"] = Window:AddTab("UI Settings", "settings"),
 }
 
--- MAIN
 local MainGroup = Tabs.Main:AddLeftGroupbox("Info", "info")
-MainGroup:AddLabel("Anime Stars v1.7", true)
+MainGroup:AddLabel("Anime Stars v2.1", true)
+MainGroup:AddLabel("Anti-AFK: Enabled", true)
 local HeroDisplayLabel = MainGroup:AddLabel("Current Hero: " .. GetCurrentHero(), true)
+local GroupInfoLabel = MainGroup:AddLabel("Group Farm: -", true)
 
 local PlayerGroup = Tabs.Main:AddRightGroupbox("Server", "server")
 PlayerGroup:AddButton({
@@ -399,6 +435,14 @@ PlayerGroup:AddButton({
 -- AUTO FARM
 local FarmGroup = Tabs.Farm:AddLeftGroupbox("Auto Farm", "swords")
 FarmGroup:AddToggle("AutoAttack", { Text = "Auto Attack", Default = false })
+FarmGroup:AddToggle("SmartGroupFarm", { 
+    Text = "Smart Group Farm ★", 
+    Default = true,
+})
+FarmGroup:AddSlider("GroupRadius", {
+    Text = "Group Detection Radius",
+    Default = 25, Min = 10, Max = 60, Rounding = 0, Suffix = " studs",
+})
 FarmGroup:AddToggle("UseAnchor", { Text = "Anchor Mode", Default = false })
 FarmGroup:AddDivider()
 FarmGroup:AddToggle("AutoSkill", { Text = "Auto Skill", Default = false })
@@ -410,9 +454,7 @@ local TargetGroup = Tabs.Farm:AddRightGroupbox("Target Filter", "target")
 TargetGroup:AddToggle("PriorityMob", { Text = "Prioritize Specific Mob", Default = false })
 
 TargetGroup:AddDropdown("SelectedZone", {
-    Values = ZoneList,
-    Default = ZoneList[1] or "Skylands",
-    Text = "Zone",
+    Values = ZoneList, Default = ZoneList[1] or "Skylands", Text = "Zone",
     Callback = function(zoneName)
         local zoneId = ZoneNameToId[zoneName]
         local mobList = AllByZone[zoneId] or {}
@@ -427,21 +469,12 @@ local defaultZoneId = ZoneNameToId[defaultZone]
 local defaultMobs = AllByZone[defaultZoneId] or {"Deidaro"}
 
 TargetGroup:AddDropdown("SelectedMob", {
-    Values = defaultMobs,
-    Default = defaultMobs[1],
-    Text = "Priority Mob",
-    Searchable = true,
+    Values = defaultMobs, Default = defaultMobs[1], Text = "Priority Mob", Searchable = true,
 })
 
 -- AUTO QUEST
 local QuestGroup = Tabs.Quest:AddLeftGroupbox("Auto Quest (Full Loop)", "scroll-text")
-
-QuestGroup:AddToggle("AutoQuest", {
-    Text = "Auto Quest",
-    Default = false,
-    Tooltip = "Full loop: farm → claim → new quest → repeat",
-})
-
+QuestGroup:AddToggle("AutoQuest", { Text = "Auto Quest", Default = false })
 QuestGroup:AddToggle("AutoTeleportToZone", { Text = "Auto Teleport to Zone", Default = true })
 QuestGroup:AddToggle("AutoClaim", { Text = "Auto Claim Quests", Default = true })
 
@@ -462,86 +495,89 @@ QuestGroup:AddButton({
             QuestProgressLabel:SetText("Progress: " .. q.progress)
             QuestZoneLabel:SetText("Zone: " .. (parsed.zone or "Unknown"))
             QuestDiffLabel:SetText("Difficulty: " .. (parsed.difficulty or "Any"))
-            local target = parsed.mobName or "Any"
-            QuestTargetLabel:SetText("Target: " .. target)
+            QuestTargetLabel:SetText("Target: " .. (parsed.mobName or "Any"))
             QuestClaimLabel:SetText("Claim Ready: " .. (q.canClaim and "YES" or "No"))
         end
     end,
 })
-
 QuestGroup:AddButton({
-    Text = "Manual Claim Now",
+    Text = "Manual Claim",
     Func = function()
         local ok = ClickClaimButton()
         Library:Notify({Title="Claim", Description=ok and "Clicked!" or "Nothing to claim", Time=3})
     end,
 })
 
-local DebugGroup = Tabs.Quest:AddRightGroupbox("Debug", "bug")
+-- EXTRAS
+local ChampionGroup = Tabs.Extras:AddLeftGroupbox("Auto Champions (Stars)", "star")
+ChampionGroup:AddToggle("AutoChampionSpin", { Text = "Auto Champion Spin", Default = false })
+ChampionGroup:AddDropdown("ChampionSpinZone", {
+    Values = ChampionSpinDisplay, Default = "Skylands", Text = "Zone to Spin",
+})
+ChampionGroup:AddButton({
+    Text = "Manual Champion Spin (Hidden)",
+    Func = function()
+        local zoneName = Options.ChampionSpinZone.Value
+        for i, d in ipairs(ChampionSpinDisplay) do
+            if d == zoneName then
+                Actions.HiddenChampionSpin(ChampionSpinZones[i])
+                break
+            end
+        end
+    end,
+})
+ChampionGroup:AddButton({
+    Text = "Force Stop Champions",
+    Func = function() Actions.GachaStop("Champions") end,
+})
 
+local GachaGroup = Tabs.Extras:AddRightGroupbox("Auto Gacha", "gift")
+GachaGroup:AddToggle("AutoHakiGacha", { Text = "Auto Haki Gacha", Default = false })
+GachaGroup:AddToggle("AutoRacesGacha", { Text = "Auto Races Gacha", Default = false })
+GachaGroup:AddButton({ Text = "Manual Haki Spin (Hidden)", Func = function() Actions.HiddenSpin("HakiGacha") end })
+GachaGroup:AddButton({ Text = "Manual Races Spin (Hidden)", Func = function() Actions.HiddenSpin("RacesGacha") end })
+GachaGroup:AddButton({ Text = "Stop All Gacha", Func = function() 
+    Actions.GachaStop("HakiGacha")
+    Actions.GachaStop("RacesGacha")
+    Actions.GachaStop("Champions")
+end })
+
+local RankupGroup = Tabs.Extras:AddLeftGroupbox("Auto Rankup", "arrow-up")
+RankupGroup:AddToggle("AutoRankup", { Text = "Auto Rankup Power", Default = false })
+RankupGroup:AddSlider("RankupDelay", {
+    Text = "Rankup Delay", Default = 2, Min = 0.5, Max = 30, Rounding = 1, Suffix = "s",
+})
+
+local DebugGroup = Tabs.Quest:AddRightGroupbox("Debug", "bug")
 DebugGroup:AddButton({
     Text = "Scan Nearby Mobs",
     Func = function()
         local enemies = Workspace:FindFirstChild("Enemies")
         if not enemies then return end
-        print("\n=== NEARBY MOB SCAN ===")
+        print("\n=== NEARBY MOBS ===")
         local count = 0
         for _, mob in ipairs(enemies:GetChildren()) do
             local info = GetMobInfo(mob)
             if info.name then
                 count = count + 1
-                print(string.format("[%d] %s | Difficulty: %s | Champion: %s", 
-                    count, info.name, tostring(info.difficulty), tostring(IsChampion(info.name))))
+                print(string.format("[%d] %s | Difficulty: %s", count, info.name, tostring(info.difficulty)))
                 if count >= 15 then break end
             end
         end
-        Library:Notify({Title="Scan Done", Description="Check console (F9)", Time=3})
-    end,
-})
-
-DebugGroup:AddButton({
-    Text = "Remote Spy (30s)",
-    Func = function()
-        Library:Notify({Title="Spy Started", Description="Do actions!", Time=3})
-        local mt = getrawmetatable(game)
-        setreadonly(mt, false)
-        local seen = {}
-        local oldNamecall
-        oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
-            if self == Remote and getnamecallmethod() == "FireServer" then
-                local args = {...}
-                if args[1] and type(args[1]) == "table" then
-                    for _, entry in ipairs(args[1]) do
-                        if entry.Path and not seen[entry.Path] then
-                            seen[entry.Path] = true
-                            print("[SPY]", entry.Path)
-                            if entry.Params then
-                                for i, p in ipairs(entry.Params) do
-                                    print("  P" .. i .. ":", tostring(p))
-                                end
-                            end
-                        end
-                    end
-                end
-            end
-            return oldNamecall(self, ...)
-        end)
-        task.wait(30)
-        hookmetamethod(game, "__namecall", oldNamecall)
-        Library:Notify({Title="Spy Ended", Description="Check F9", Time=3})
     end,
 })
 
 -- ═══════════════════════════════════════════════════════════
--- POSITIONING
+-- POSITIONING (Fixed - now truly centers on group)
 -- ═══════════════════════════════════════════════════════════
 local currentTarget = nil
+local currentGroupCenter = nil
+local currentGroupSize = 0
+local currentGroup = nil
 local comboIndex = 1
-local lastMobPos = nil
 
 RunService.Heartbeat:Connect(function()
     if Library.Unloaded then return end
-    
     local char = LocalPlayer.Character
     if not char then return end
     local myHrp = char:FindFirstChild("HumanoidRootPart")
@@ -549,7 +585,6 @@ RunService.Heartbeat:Connect(function()
     
     if not (Toggles.AutoAttack.Value or Toggles.AutoQuest.Value) then
         if myHrp.Anchored then myHrp.Anchored = false end
-        lastMobPos = nil
         return
     end
     
@@ -571,33 +606,61 @@ RunService.Heartbeat:Connect(function()
     if not myHum then return end
     myHum.PlatformStand = false
     
-    local mobPos = mobHrp.Position
+    local targetPos, lookAt
     
-    if lastMobPos and (mobPos - lastMobPos).Magnitude < 0.5 then
-        myHrp.AssemblyLinearVelocity = Vector3.zero
-        myHrp.AssemblyAngularVelocity = Vector3.zero
-        if Toggles.UseAnchor.Value and not myHrp.Anchored then
-            myHrp.Anchored = true
+    if Toggles.SmartGroupFarm.Value and currentGroup and #currentGroup > 1 then
+        -- Recalculate center from live group members (dead mobs removed)
+        local liveMembers = {}
+        for _, m in ipairs(currentGroup) do
+            if m.mob and m.mob.Parent then
+                local h = m.mob:FindFirstChildOfClass("Humanoid")
+                local hrp = m.mob:FindFirstChild("HumanoidRootPart")
+                if h and h.Health > 0 and hrp then
+                    table.insert(liveMembers, hrp.Position)
+                end
+            end
         end
-        return
-    end
-    
-    lastMobPos = mobPos
-    
-    local myPos = myHrp.Position
-    local direction = (myPos - mobPos)
-    direction = Vector3.new(direction.X, 0, direction.Z)
-    
-    if direction.Magnitude < 0.01 then
-        direction = Vector3.new(0, 0, 1)
+        
+        if #liveMembers > 1 then
+            local sum = Vector3.zero
+            for _, p in ipairs(liveMembers) do sum = sum + p end
+            local center = sum / #liveMembers
+            targetPos = Vector3.new(center.X, mobHrp.Position.Y, center.Z)
+            lookAt = mobHrp.Position
+            currentGroupSize = #liveMembers
+        else
+            -- Group depleted, fall back to single-mob positioning
+            local mobPos = mobHrp.Position
+            local myPos = myHrp.Position
+            local direction = (myPos - mobPos)
+            direction = Vector3.new(direction.X, 0, direction.Z)
+            if direction.Magnitude < 0.01 then
+                direction = Vector3.new(0, 0, 1)
+            else
+                direction = direction.Unit
+            end
+            targetPos = mobPos + direction * HOVER_DISTANCE
+            targetPos = Vector3.new(targetPos.X, mobPos.Y, targetPos.Z)
+            lookAt = mobPos
+            currentGroupSize = 1
+        end
     else
-        direction = direction.Unit
+        -- Single target
+        local mobPos = mobHrp.Position
+        local myPos = myHrp.Position
+        local direction = (myPos - mobPos)
+        direction = Vector3.new(direction.X, 0, direction.Z)
+        if direction.Magnitude < 0.01 then
+            direction = Vector3.new(0, 0, 1)
+        else
+            direction = direction.Unit
+        end
+        targetPos = mobPos + direction * HOVER_DISTANCE
+        targetPos = Vector3.new(targetPos.X, mobPos.Y, targetPos.Z)
+        lookAt = mobPos
     end
     
-    local targetPos = mobPos + direction * HOVER_DISTANCE
-    targetPos = Vector3.new(targetPos.X, mobPos.Y, targetPos.Z)
-    
-    myHrp.CFrame = CFrame.lookAt(targetPos, mobPos)
+    myHrp.CFrame = CFrame.lookAt(targetPos, lookAt)
     myHrp.AssemblyLinearVelocity = Vector3.zero
     myHrp.AssemblyAngularVelocity = Vector3.zero
     
@@ -609,7 +672,7 @@ RunService.Heartbeat:Connect(function()
 end)
 
 -- ═══════════════════════════════════════════════════════════
--- QUEST LOOP (reads + auto claims + auto teleports)
+-- QUEST LOOP
 -- ═══════════════════════════════════════════════════════════
 local activeQuestData = nil
 local lastZoneTeleport = 0
@@ -620,6 +683,11 @@ task.spawn(function()
         
         pcall(function()
             HeroDisplayLabel:SetText("Current Hero: " .. GetCurrentHero())
+            if Toggles.SmartGroupFarm.Value and currentGroupSize > 1 then
+                GroupInfoLabel:SetText("Group Farm: " .. currentGroupSize .. " mobs")
+            else
+                GroupInfoLabel:SetText("Group Farm: single target")
+            end
         end)
         
         local q = GetActiveQuest()
@@ -636,18 +704,15 @@ task.spawn(function()
                 QuestClaimLabel:SetText("Claim Ready: " .. (q.canClaim and "YES ✓" or "No"))
             end)
             
-            -- Auto Claim
             if Toggles.AutoQuest.Value and Toggles.AutoClaim.Value and q.canClaim then
                 task.wait(0.5)
                 ClickClaimButton()
                 Library:Notify({Title="Auto Claim", Description="Quest claimed!", Time=2})
-                task.wait(2) -- wait for next quest to load
+                task.wait(2)
             end
             
-            -- Auto Teleport when in wrong zone
             if Toggles.AutoQuest.Value and Toggles.AutoTeleportToZone.Value and parsed.zoneId then
                 if tick() - lastZoneTeleport > 10 then
-                    -- Check if we should teleport (only if no matching mobs nearby)
                     local hasMatchingMobs = false
                     local enemies = Workspace:FindFirstChild("Enemies")
                     if enemies then
@@ -660,10 +725,8 @@ task.spawn(function()
                             end
                         end
                     end
-                    
                     if not hasMatchingMobs then
                         Actions.Teleport(parsed.zoneId)
-                        currentZone = parsed.zoneId
                         lastZoneTeleport = tick()
                         Library:Notify({Title="Auto Quest", Description="TP → "..parsed.zone, Time=3})
                     end
@@ -671,46 +734,46 @@ task.spawn(function()
             end
         else
             activeQuestData = nil
-            pcall(function()
-                QuestTitleLabel:SetText("Quest: (none detected)")
-            end)
+            pcall(function() QuestTitleLabel:SetText("Quest: (none detected)") end)
         end
     end
 end)
 
--- ═══════════════════════════════════════════════════════════
 -- ATTACK LOOP
--- ═══════════════════════════════════════════════════════════
 task.spawn(function()
     while task.wait() do
         if Library.Unloaded then break end
-        
         local shouldFarm = Toggles.AutoAttack.Value or Toggles.AutoQuest.Value
         
         if shouldFarm then
             local hero = GetCurrentHero()
-            
             local needNewTarget = true
             if currentTarget and currentTarget.Parent then
                 local h = currentTarget:FindFirstChildOfClass("Humanoid")
-                if h and h.Health > 0 then
-                    needNewTarget = false
-                end
+                if h and h.Health > 0 then needNewTarget = false end
             end
             
             if needNewTarget then
                 local filter = nil
-                
                 if Toggles.AutoQuest.Value and activeQuestData then
-                    filter = {
-                        mobName = activeQuestData.mobName,
-                        difficulty = activeQuestData.difficulty,
-                    }
+                    filter = {mobName = activeQuestData.mobName, difficulty = activeQuestData.difficulty}
                 elseif Toggles.PriorityMob.Value then
                     filter = {mobName = Options.SelectedMob.Value}
                 end
                 
-                currentTarget = GetTargetMob(filter)
+                if Toggles.SmartGroupFarm.Value then
+                    local mob, group, center = GetMobGroup(filter, Options.GroupRadius.Value)
+                    currentTarget = mob
+                    currentGroup = group
+                    currentGroupCenter = center
+                    currentGroupSize = group and #group or 0
+                else
+                    currentTarget = GetSingleTarget(filter)
+                    currentGroup = nil
+                    currentGroupCenter = nil
+                    currentGroupSize = 0
+                end
+                
                 comboIndex = 1
             end
             
@@ -723,6 +786,9 @@ task.spawn(function()
             task.wait(ATTACK_DELAY)
         else
             currentTarget = nil
+            currentGroup = nil
+            currentGroupCenter = nil
+            currentGroupSize = 0
             task.wait(0.1)
         end
     end
@@ -748,10 +814,107 @@ task.spawn(function()
     end
 end)
 
+-- ═══════════════════════════════════════════════════════════
+-- EFFICIENT AUTO SPINNERS (Toggle-based, not looped)
+-- Fires ONCE when toggled on, stops when toggled off
+-- ═══════════════════════════════════════════════════════════
+Toggles.AutoChampionSpin:OnChanged(function()
+    if Toggles.AutoChampionSpin.Value then
+        local zoneName = Options.ChampionSpinZone.Value
+        for i, d in ipairs(ChampionSpinDisplay) do
+            if d == zoneName then
+                Actions.HiddenChampionSpin(ChampionSpinZones[i])
+                Library:Notify({Title="Champion Spin", Description="Started auto @ "..zoneName, Time=2})
+                break
+            end
+        end
+    else
+        Actions.GachaStop("Champions")
+        Library:Notify({Title="Champion Spin", Description="Stopped", Time=2})
+    end
+end)
+
+Options.ChampionSpinZone:OnChanged(function()
+    if Toggles.AutoChampionSpin.Value then
+        Actions.GachaStop("Champions")
+        task.wait(0.3)
+        local zoneName = Options.ChampionSpinZone.Value
+        for i, d in ipairs(ChampionSpinDisplay) do
+            if d == zoneName then
+                Actions.HiddenChampionSpin(ChampionSpinZones[i])
+                break
+            end
+        end
+    end
+end)
+
+Toggles.AutoHakiGacha:OnChanged(function()
+    if Toggles.AutoHakiGacha.Value then
+        Actions.HiddenSpin("HakiGacha")
+        Library:Notify({Title="Haki Gacha", Description="Started", Time=2})
+    else
+        Actions.GachaStop("HakiGacha")
+        Library:Notify({Title="Haki Gacha", Description="Stopped", Time=2})
+    end
+end)
+
+Toggles.AutoRacesGacha:OnChanged(function()
+    if Toggles.AutoRacesGacha.Value then
+        Actions.HiddenSpin("RacesGacha")
+        Library:Notify({Title="Races Gacha", Description="Started", Time=2})
+    else
+        Actions.GachaStop("RacesGacha")
+        Library:Notify({Title="Races Gacha", Description="Stopped", Time=2})
+    end
+end)
+
+-- Watchdog: if auto is on but game stopped it, restart (every 15s)
+task.spawn(function()
+    while task.wait(15) do
+        if Library.Unloaded then break end
+        if Toggles.AutoChampionSpin.Value then
+            local zoneName = Options.ChampionSpinZone.Value
+            for i, d in ipairs(ChampionSpinDisplay) do
+                if d == zoneName then
+                    Actions.GachaHide("Champions", true)
+                    Actions.ChampionSpin(ChampionSpinZones[i])
+                    break
+                end
+            end
+        end
+        if Toggles.AutoHakiGacha.Value then
+            Actions.GachaHide("HakiGacha", true)
+            Actions.GachaSpin("HakiGacha")
+        end
+        if Toggles.AutoRacesGacha.Value then
+            Actions.GachaHide("RacesGacha", true)
+            Actions.GachaSpin("RacesGacha")
+        end
+    end
+end)
+
+task.spawn(function()
+    while task.wait(0.5) do
+        if Library.Unloaded then break end
+        if Toggles.AutoRankup.Value then
+            Actions.RankupPower()
+            task.wait(Options.RankupDelay.Value)
+        end
+    end
+end)
+
 LocalPlayer.CharacterAdded:Connect(function(char)
     task.wait(0.5)
     local hrp = char:WaitForChild("HumanoidRootPart", 5)
     if hrp then hrp.Anchored = false end
+end)
+
+Library:OnUnload(function()
+    pcall(function()
+        Actions.GachaStop("HakiGacha")
+        Actions.GachaStop("RacesGacha")
+        Actions.GachaStop("Champions")
+    end)
 end)
 
 -- TELEPORT
@@ -804,4 +967,4 @@ SaveManager:BuildConfigSection(Tabs["UI Settings"])
 ThemeManager:ApplyToTab(Tabs["UI Settings"])
 SaveManager:LoadAutoloadConfig()
 
-Library:Notify({Title="Anime Stars v1.7", Description="Full Auto Quest Loop!", Time=5})
+Library:Notify({Title="Anime Stars v2.1", Description="Group centering + hidden spins fixed!", Time=5})

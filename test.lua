@@ -1,6 +1,5 @@
 -- ═══════════════════════════════════════════════════════════
--- ANIME STARS SCRIPT v2.8 - FULLY DYNAMIC
--- Auto-detects zones, gachas, mobs, banners from game data
+-- ANIME STARS SCRIPT v2.9 - Dynamic + Auto Banner
 -- ═══════════════════════════════════════════════════════════
 
 local repo = "https://raw.githubusercontent.com/deividcomsono/Obsidian/main/"
@@ -31,8 +30,6 @@ end)
 -- ═══════════════════════════════════════════════════════════
 -- DYNAMIC DATA LOADERS
 -- ═══════════════════════════════════════════════════════════
-
--- Load zones from game directory
 local function LoadZones()
     local zones = {}
     local nameToId = {}
@@ -45,28 +42,17 @@ local function LoadZones()
                 local id = data._id or zoneModule.Name
                 local display = data.DisplayName or id
                 local order = data.Order or 99
-                table.insert(zones, {
-                    id = id,
-                    display = display,
-                    order = order,
-                    cost = data.Cost or 0,
-                })
+                table.insert(zones, {id=id, display=display, order=order, cost=data.Cost or 0})
                 nameToId[display] = id
-                -- Auto-generate aliases from display name
                 aliases[display:lower()] = id
                 aliases[id:lower()] = id
-                -- Split words for partial matching
                 for word in display:lower():gmatch("%S+") do
-                    if #word >= 4 then
-                        aliases[word] = id
-                    end
+                    if #word >= 4 then aliases[word] = id end
                 end
             end
         end
     end
-    -- Sort by order
     table.sort(zones, function(a, b) return a.order < b.order end)
-    -- Manual aliases for common quest phrasing
     aliases["shinobi world"] = "desertvillage"
     aliases["shinobi"] = "desertvillage"
     aliases["namekian world"] = "alienplanet"
@@ -76,7 +62,6 @@ local function LoadZones()
     return zones, nameToId, aliases
 end
 
--- Load gachas from game directory
 local function LoadGachas()
     local result = {}
     local dir = ReplicatedStorage.Shared.Configs:FindFirstChild("GachaConfig")
@@ -95,7 +80,6 @@ local function LoadGachas()
     return result
 end
 
--- Load enemies by zone
 local function GetEnemiesByZone()
     local dir = ReplicatedStorage.Shared.Directory.Enemies._Index
     local result = {}
@@ -130,7 +114,6 @@ local function GetChampionsByZone()
     return result
 end
 
--- Load banner types
 local function LoadBanners()
     local result = {}
     local dir = ReplicatedStorage.Shared.Directory.Banners:FindFirstChild("_Index")
@@ -148,7 +131,6 @@ local BannerData = LoadBanners()
 local EnemiesByZone = GetEnemiesByZone()
 local ChampionsByZone = GetChampionsByZone()
 
--- Build display list for zones
 local ZoneList = {}
 local ZoneDisplayNames = {}
 for _, z in ipairs(ZoneData) do
@@ -156,7 +138,6 @@ for _, z in ipairs(ZoneData) do
     table.insert(ZoneList, z.display)
 end
 
--- Combined by zone (mobs + champions)
 local AllByZone = {}
 for zone, mobs in pairs(EnemiesByZone) do
     AllByZone[zone] = AllByZone[zone] or {}
@@ -167,7 +148,6 @@ for zone, champs in pairs(ChampionsByZone) do
     for _, c in ipairs(champs) do table.insert(AllByZone[zone], c) end
 end
 
--- Zones with mobs only (for farming dropdown)
 local FarmZoneList = {}
 for _, z in ipairs(ZoneData) do
     if AllByZone[z.id] and #AllByZone[z.id] > 0 then
@@ -175,15 +155,6 @@ for _, z in ipairs(ZoneData) do
     end
 end
 
--- Gacha display lists
-local GachaDisplayList = {}
-local GachaDisplayToId = {}
-for _, g in ipairs(GachaData) do
-    table.insert(GachaDisplayList, g.display)
-    GachaDisplayToId[g.display] = g
-end
-
--- Champion spin zones (zones that have champions)
 local ChampionSpinDisplay = {}
 local ChampionSpinIdMap = {}
 for _, z in ipairs(ZoneData) do
@@ -193,11 +164,10 @@ for _, z in ipairs(ZoneData) do
     end
 end
 
-print("[Anime Stars] Loaded:")
+print("[Anime Stars v2.9] Loaded:")
 print("  Zones:", #ZoneData)
 print("  Gachas:", #GachaData)
 print("  Banners:", #BannerData)
-print("  Champion spin zones:", #ChampionSpinDisplay)
 
 -- ═══════════════════════════════════════════════════════════
 -- POPUP HIDING
@@ -385,11 +355,17 @@ end
 function Actions.RankupPower()
     Remote:FireServer({{Path="rankup/power", Params={}}})
 end
+function Actions.BannerRoll(bannerName, count, rollType)
+    Remote:FireServer({{Path="banner/requestRoll", Params={bannerName, count, rollType or "Normal"}}})
+end
 function Actions.HiddenSpin(gachaName)
     HideSpinPopups(); Actions.GachaSpin(gachaName); task.wait(0.1); HideSpinPopups()
 end
 function Actions.HiddenChampionSpin(zoneId)
     HideSpinPopups(); Actions.ChampionSpin(zoneId); task.wait(0.1); HideSpinPopups()
+end
+function Actions.HiddenBannerRoll(banner, count, rollType)
+    HideSpinPopups(); Actions.BannerRoll(banner, count, rollType); task.wait(0.1); HideSpinPopups()
 end
 
 local function GetCurrentHero()
@@ -492,7 +468,7 @@ Library.ForceCheckbox = false
 Library.ShowToggleFrameInKeybinds = true
 
 local Window = Library:CreateWindow({
-    Title = "Anime Stars", Footer = "v2.8 Dynamic",
+    Title = "Anime Stars", Footer = "v2.9",
     Icon = 95816097006870, NotifySide = "Right",
     ShowCustomCursor = true,
 })
@@ -502,14 +478,15 @@ local Tabs = {
     Farm = Window:AddTab("Auto Farm", "swords"),
     Quest = Window:AddTab("Auto Quest", "scroll-text"),
     Extras = Window:AddTab("Auto Extras", "sparkles"),
+    Summon = Window:AddTab("Auto Summon", "gift"),
     Teleport = Window:AddTab("Teleports", "map"),
     ["UI Settings"] = Window:AddTab("UI Settings", "settings"),
 }
 
 local MainGroup = Tabs.Main:AddLeftGroupbox("Info", "info")
-MainGroup:AddLabel("Anime Stars v2.8 (Dynamic)", true)
+MainGroup:AddLabel("Anime Stars v2.9 (Dynamic)", true)
 MainGroup:AddLabel("Anti-AFK: Enabled", true)
-MainGroup:AddLabel("Zones: " .. #ZoneData .. " | Gachas: " .. #GachaData, true)
+MainGroup:AddLabel("Zones: " .. #ZoneData .. " | Gachas: " .. #GachaData .. " | Banners: " .. #BannerData, true)
 local HeroDisplayLabel = MainGroup:AddLabel("Current Hero: " .. GetCurrentHero(), true)
 local GroupInfoLabel = MainGroup:AddLabel("Group Farm: -", true)
 local TargetInfoLabel = MainGroup:AddLabel("Target: -", true)
@@ -631,17 +608,15 @@ ChampionGroup:AddButton({
 })
 ChampionGroup:AddButton({ Text = "Force Stop", Func = function() Actions.GachaStop("Champions") end })
 
--- EXTRAS - GACHAS (fully dynamic!)
-local GachaGroup = Tabs.Extras:AddRightGroupbox("Auto Gacha (" .. #GachaData .. " available)", "gift")
+-- EXTRAS - GACHAS
+local GachaGroup = Tabs.Extras:AddRightGroupbox("Auto Gacha (" .. #GachaData .. ")", "gift")
 
-local gachaTogglesList = {} -- track for stop button
+local gachaTogglesList = {}
 
 for _, gacha in ipairs(GachaData) do
     local toggleName = "AutoGacha_" .. gacha.id
     table.insert(gachaTogglesList, {toggleName = toggleName, gacha = gacha})
-    
     local zoneText = gacha.requireZone and (" [" .. (ZoneDisplayNames[gacha.requireZone] or gacha.requireZone) .. "]") or ""
-    
     GachaGroup:AddToggle(toggleName, { 
         Text = "Auto " .. gacha.display .. zoneText,
         Default = false,
@@ -673,6 +648,58 @@ RankupGroup:AddToggle("AutoRankup", { Text = "Auto Rankup Power", Default = fals
 RankupGroup:AddSlider("RankupDelay", {
     Text = "Delay", Default = 2, Min = 0.5, Max = 30, Rounding = 1, Suffix = "s",
 })
+
+-- AUTO SUMMON TAB (NEW!)
+local BannerGroup = Tabs.Summon:AddLeftGroupbox("Auto Banner Summon", "gift")
+
+BannerGroup:AddToggle("AutoBanner", { 
+    Text = "Auto Banner Summon", 
+    Default = false,
+    Tooltip = "Auto-summons on selected banner",
+})
+
+BannerGroup:AddDropdown("BannerType", {
+    Values = BannerData,
+    Default = BannerData[1] or "Mythic",
+    Text = "Banner",
+})
+
+BannerGroup:AddDropdown("BannerRollCount", {
+    Values = {"1", "10"},
+    Default = "10",
+    Text = "Rolls per Summon",
+})
+
+BannerGroup:AddDropdown("BannerRollType", {
+    Values = {"Normal", "Premium"},
+    Default = "Normal",
+    Text = "Ticket Type",
+})
+
+BannerGroup:AddSlider("BannerDelay", {
+    Text = "Summon Delay", 
+    Default = 5, Min = 1, Max = 60, Rounding = 1, Suffix = "s",
+})
+
+BannerGroup:AddButton({
+    Text = "Manual Summon",
+    Func = function()
+        local banner = Options.BannerType.Value
+        local count = tonumber(Options.BannerRollCount.Value) or 1
+        local rollType = Options.BannerRollType.Value
+        Actions.HiddenBannerRoll(banner, count, rollType)
+        Library:Notify({Title="Banner", Description=banner .. " x" .. count, Time=2})
+    end,
+})
+
+local BannerInfoGroup = Tabs.Summon:AddRightGroupbox("Info", "info")
+BannerInfoGroup:AddLabel("Available Banners:", true)
+for _, b in ipairs(BannerData) do
+    BannerInfoGroup:AddLabel("• " .. b, true)
+end
+BannerInfoGroup:AddDivider()
+BannerInfoGroup:AddLabel("Normal = uses regular tickets", true)
+BannerInfoGroup:AddLabel("Premium = uses premium tickets", true)
 
 -- DEBUG
 local DebugGroup = Tabs.Quest:AddRightGroupbox("Debug", "bug")
@@ -852,7 +879,7 @@ end)
 task.spawn(function()
     while task.wait(0.05) do
         if Library.Unloaded then break end
-        local anyActive = Toggles.AutoChampionSpin.Value
+        local anyActive = Toggles.AutoChampionSpin.Value or (Toggles.AutoBanner and Toggles.AutoBanner.Value)
         for _, g in ipairs(gachaTogglesList) do
             if Toggles[g.toggleName] and Toggles[g.toggleName].Value then anyActive = true; break end
         end
@@ -1046,7 +1073,6 @@ Options.ChampionSpinZone:OnChanged(function()
     end
 end)
 
--- Set up OnChanged for every dynamic gacha toggle
 for _, g in ipairs(gachaTogglesList) do
     Toggles[g.toggleName]:OnChanged(function()
         if Toggles[g.toggleName].Value then
@@ -1055,8 +1081,7 @@ for _, g in ipairs(gachaTogglesList) do
         else
             Actions.GachaStop(g.gacha.id)
             task.wait(0.5)
-            -- Only show popups if nothing else is running
-            local anyActive = Toggles.AutoChampionSpin.Value
+            local anyActive = Toggles.AutoChampionSpin.Value or (Toggles.AutoBanner and Toggles.AutoBanner.Value)
             for _, g2 in ipairs(gachaTogglesList) do
                 if g2.toggleName ~= g.toggleName and Toggles[g2.toggleName].Value then anyActive = true; break end
             end
@@ -1065,7 +1090,36 @@ for _, g in ipairs(gachaTogglesList) do
     end)
 end
 
--- Watchdog: restart if game stopped
+-- BANNER LOOP + toggle
+task.spawn(function()
+    while task.wait(1) do
+        if Library.Unloaded then break end
+        if Toggles.AutoBanner and Toggles.AutoBanner.Value then
+            local banner = Options.BannerType.Value
+            local count = tonumber(Options.BannerRollCount.Value) or 1
+            local rollType = Options.BannerRollType.Value
+            HideSpinPopups()
+            Actions.BannerRoll(banner, count, rollType)
+            task.wait(Options.BannerDelay.Value)
+        end
+    end
+end)
+
+Toggles.AutoBanner:OnChanged(function()
+    if Toggles.AutoBanner.Value then
+        Library:Notify({Title="Banner Summon", Description="Started auto-summon", Time=2})
+    else
+        task.wait(0.5)
+        local anyActive = Toggles.AutoChampionSpin.Value
+        for _, g in ipairs(gachaTogglesList) do
+            if Toggles[g.toggleName].Value then anyActive = true; break end
+        end
+        if not anyActive then ShowSpinPopups() end
+        Library:Notify({Title="Banner Summon", Description="Stopped", Time=2})
+    end
+end)
+
+-- Watchdog
 task.spawn(function()
     while task.wait(15) do
         if Library.Unloaded then break end
@@ -1075,9 +1129,7 @@ task.spawn(function()
             if zoneId then Actions.ChampionSpin(zoneId) end
         end
         for _, g in ipairs(gachaTogglesList) do
-            if Toggles[g.toggleName].Value then
-                Actions.GachaSpin(g.gacha.id)
-            end
+            if Toggles[g.toggleName].Value then Actions.GachaSpin(g.gacha.id) end
         end
     end
 end)
@@ -1107,7 +1159,7 @@ Library:OnUnload(function()
     end)
 end)
 
--- TELEPORT (dynamic from ZoneData)
+-- TELEPORT
 local TeleportGroup = Tabs.Teleport:AddLeftGroupbox("Zones", "map-pin")
 for _, zone in ipairs(ZoneData) do
     TeleportGroup:AddButton({
@@ -1149,7 +1201,7 @@ ThemeManager:ApplyToTab(Tabs["UI Settings"])
 SaveManager:LoadAutoloadConfig()
 
 Library:Notify({
-    Title="Anime Stars v2.8", 
-    Description=string.format("Loaded %d zones, %d gachas", #ZoneData, #GachaData), 
+    Title="Anime Stars v2.9", 
+    Description=string.format("%d zones, %d gachas, %d banners", #ZoneData, #GachaData, #BannerData), 
     Time=5
 })

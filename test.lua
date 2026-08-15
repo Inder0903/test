@@ -1,6 +1,6 @@
 -- ═══════════════════════════════════════════════════════════
--- ANIME STARS SCRIPT v2.4
--- Fuzzy mob matching + everything from v2.3
+-- ANIME STARS SCRIPT v2.7
+-- Fixed fuzzy match (strict + positional)
 -- ═══════════════════════════════════════════════════════════
 
 local repo = "https://raw.githubusercontent.com/deividcomsono/Obsidian/main/"
@@ -21,7 +21,6 @@ local LocalPlayer = Players.LocalPlayer
 local Remote = ReplicatedStorage.Shared.Packages.Events.RemoteEvent
 
 local ATTACK_DELAY = 0.05
-local ATTACK_RANGE = 2000
 local HOVER_DISTANCE = 5
 
 LocalPlayer.Idled:Connect(function()
@@ -139,18 +138,11 @@ local function ShowSpinPopups()
     pcall(function()
         local summon = LocalPlayer.PlayerGui:FindFirstChild("Summon")
         if summon then summon.Enabled = true end
-        local popups = LocalPlayer.PlayerGui:FindFirstChild("Popups")
-        if popups then
-            for _, name in ipairs(POPUPS_TO_HIDE) do
-                local p = popups:FindFirstChild(name)
-                if p then p.Visible = true end
-            end
-        end
     end)
 end
 
 -- ═══════════════════════════════════════════════════════════
--- MOB INFO + FUZZY FILTERING
+-- MOB INFO + STRICT NAME MATCHING
 -- ═══════════════════════════════════════════════════════════
 local function GetMobInfo(mobModel)
     for _, gui in ipairs(LocalPlayer.PlayerGui:GetChildren()) do
@@ -180,24 +172,23 @@ local function IsChampion(mobName)
     return false
 end
 
--- FUZZY name matcher: case-insensitive + contains + spelling tolerance
+-- STRICT positional matcher
 local function NameMatches(actualName, wantedName)
     if not actualName or not wantedName then return false end
     local a = actualName:lower():gsub("%s+", "")
     local w = wantedName:lower():gsub("%s+", "")
+    -- Exact
     if a == w then return true end
+    -- Contains (either direction)
     if a:find(w, 1, true) or w:find(a, 1, true) then return true end
-    -- Edit distance tolerance: 1-char differences (Loki/Lokki)
-    if math.abs(#a - #w) <= 2 then
-        local shorter = #a < #w and a or w
-        local longer = #a < #w and w or a
-        -- Check if shorter is subset of longer (ignoring 1-2 chars)
+    -- Positional match (same letters in same spots, 1 char diff allowed)
+    if math.abs(#a - #w) <= 1 and #a >= 3 then
+        local minLen = math.min(#a, #w)
         local matches = 0
-        for i = 1, #shorter do
-            local ch = shorter:sub(i, i)
-            if longer:find(ch, 1, true) then matches = matches + 1 end
+        for i = 1, minLen do
+            if a:sub(i,i) == w:sub(i,i) then matches = matches + 1 end
         end
-        if matches >= #shorter - 1 then return true end
+        if matches >= minLen - 1 then return true end
     end
     return false
 end
@@ -205,20 +196,17 @@ end
 local function MatchesFilter(mobModel, filter)
     if not filter then return true end
     local info = GetMobInfo(mobModel)
-    
-    -- Name filter (fuzzy)
-    if filter.mobName then
-        if not info.name then
-            -- Billboard not loaded yet — don't skip, just deprioritize (but still match)
-            -- Actually skip for priority mode because we need name confirmation
-            return false
+    if filter.mobNames and next(filter.mobNames) then
+        if not info.name then return false end
+        local matched = false
+        for name, enabled in pairs(filter.mobNames) do
+            if enabled and NameMatches(info.name, name) then matched = true; break end
         end
-        if not NameMatches(info.name, filter.mobName) then
-            return false
-        end
+        if not matched then return false end
+    elseif filter.mobName then
+        if not info.name then return false end
+        if not NameMatches(info.name, filter.mobName) then return false end
     end
-    
-    -- Difficulty filter
     if filter.difficulty then
         local wanted = NormDiff(filter.difficulty)
         local actual = NormDiff(info.difficulty)
@@ -230,24 +218,24 @@ local function MatchesFilter(mobModel, filter)
         if not actual then return false end
         return actual == wanted
     end
-    
     return true
 end
 
-local function GetAllMatchingMobs(filter)
+local function GetAllMatchingMobs(filter, ignoreRange)
     local char = LocalPlayer.Character
     if not char then return {} end
     local hrp = char:FindFirstChild("HumanoidRootPart")
     if not hrp then return {} end
     local enemies = Workspace:FindFirstChild("Enemies")
     if not enemies then return {} end
+    local maxDist = ignoreRange and math.huge or 2000
     local mobs = {}
     for _, mob in ipairs(enemies:GetChildren()) do
         local mobHrp = mob:FindFirstChild("HumanoidRootPart")
         local hum = mob:FindFirstChildOfClass("Humanoid")
         if mobHrp and hum and hum.Health > 0 then
             local dist = (hrp.Position - mobHrp.Position).Magnitude
-            if dist < ATTACK_RANGE and MatchesFilter(mob, filter) then
+            if dist < maxDist and MatchesFilter(mob, filter) then
                 table.insert(mobs, {mob=mob, hrp=mobHrp, dist=dist})
             end
         end
@@ -256,14 +244,14 @@ local function GetAllMatchingMobs(filter)
     return mobs
 end
 
-local function GetSingleTarget(filter)
-    local mobs = GetAllMatchingMobs(filter)
+local function GetSingleTarget(filter, ignoreRange)
+    local mobs = GetAllMatchingMobs(filter, ignoreRange)
     return mobs[1] and mobs[1].mob or nil
 end
 
-local function GetMobGroup(filter, groupRadius)
+local function GetMobGroup(filter, groupRadius, ignoreRange)
     groupRadius = groupRadius or 25
-    local allMobs = GetAllMatchingMobs(filter)
+    local allMobs = GetAllMatchingMobs(filter, ignoreRange)
     if #allMobs == 0 then return nil, nil, nil end
     local bestGroup = nil
     local bestScore = 0
@@ -313,19 +301,11 @@ end
 function Actions.RankupPower()
     Remote:FireServer({{Path="rankup/power", Params={}}})
 end
-
 function Actions.HiddenSpin(gachaName)
-    HideSpinPopups()
-    Actions.GachaSpin(gachaName)
-    task.wait(0.1)
-    HideSpinPopups()
+    HideSpinPopups(); Actions.GachaSpin(gachaName); task.wait(0.1); HideSpinPopups()
 end
-
 function Actions.HiddenChampionSpin(zoneId)
-    HideSpinPopups()
-    Actions.ChampionSpin(zoneId)
-    task.wait(0.1)
-    HideSpinPopups()
+    HideSpinPopups(); Actions.ChampionSpin(zoneId); task.wait(0.1); HideSpinPopups()
 end
 
 local function GetCurrentHero()
@@ -428,7 +408,7 @@ Library.ForceCheckbox = false
 Library.ShowToggleFrameInKeybinds = true
 
 local Window = Library:CreateWindow({
-    Title = "Anime Stars", Footer = "v2.4",
+    Title = "Anime Stars", Footer = "v2.7",
     Icon = 95816097006870, NotifySide = "Right",
     ShowCustomCursor = true,
 })
@@ -443,7 +423,7 @@ local Tabs = {
 }
 
 local MainGroup = Tabs.Main:AddLeftGroupbox("Info", "info")
-MainGroup:AddLabel("Anime Stars v2.4", true)
+MainGroup:AddLabel("Anime Stars v2.7", true)
 MainGroup:AddLabel("Anti-AFK: Enabled", true)
 local HeroDisplayLabel = MainGroup:AddLabel("Current Hero: " .. GetCurrentHero(), true)
 local GroupInfoLabel = MainGroup:AddLabel("Group Farm: -", true)
@@ -458,11 +438,10 @@ PlayerGroup:AddButton({
 })
 PlayerGroup:AddButton({
     Text = "Restore Popups",
-    Func = function()
-        ShowSpinPopups()
-        Library:Notify({Title="Popups", Description="Restored", Time=2})
-    end,
+    Func = function() ShowSpinPopups() end,
 })
+
+local invalidateTarget
 
 -- AUTO FARM
 local FarmGroup = Tabs.Farm:AddLeftGroupbox("Auto Farm", "swords")
@@ -480,11 +459,13 @@ FarmGroup:AddToggle("AutoUltimate", { Text = "Auto Ultimate", Default = false })
 FarmGroup:AddSlider("UltimateDelay", { Text = "Ultimate Delay", Default = 15, Min = 5, Max = 60, Rounding = 1, Suffix = "s" })
 
 local TargetGroup = Tabs.Farm:AddRightGroupbox("Target Filter", "target")
-TargetGroup:AddToggle("PriorityMob", { Text = "Prioritize Specific Mob", Default = false })
+TargetGroup:AddToggle("PriorityMob", { 
+    Text = "Prioritize Selected Mobs (overrides quest)", 
+    Default = false,
+})
 TargetGroup:AddToggle("FallbackToAny", { 
-    Text = "Fallback: Farm Any if Priority Missing",
+    Text = "Fallback: Any Mob if None Found",
     Default = true,
-    Tooltip = "If priority mob not found, farm any mob instead of standing still",
 })
 TargetGroup:AddDropdown("SelectedZone", {
     Values = ZoneList, Default = "Skylands", Text = "Zone",
@@ -493,7 +474,8 @@ TargetGroup:AddDropdown("SelectedZone", {
         local mobList = AllByZone[zoneId] or {}
         if #mobList == 0 then mobList = {"(no mobs)"} end
         Options.SelectedMob:SetValues(mobList)
-        Options.SelectedMob:SetValue(mobList[1])
+        Options.SelectedMob:SetValue({})
+        if invalidateTarget then invalidateTarget() end
     end,
 })
 
@@ -502,7 +484,14 @@ local defaultZoneId = ZoneNameToId[defaultZone]
 local defaultMobs = AllByZone[defaultZoneId] or {"Sand"}
 
 TargetGroup:AddDropdown("SelectedMob", {
-    Values = defaultMobs, Default = defaultMobs[1], Text = "Priority Mob", Searchable = true,
+    Values = defaultMobs,
+    Default = defaultMobs[1],
+    Text = "Priority Mobs (multi)",
+    Searchable = true,
+    Multi = true,
+    Callback = function()
+        if invalidateTarget then invalidateTarget() end
+    end,
 })
 
 -- AUTO QUEST
@@ -576,37 +565,59 @@ DebugGroup:AddButton({
     Text = "Scan Mobs", Func = function()
         local enemies = Workspace:FindFirstChild("Enemies")
         if not enemies then return end
+        local char = LocalPlayer.Character
+        local myHrp = char and char:FindFirstChild("HumanoidRootPart")
         print("\n=== MOBS ===")
         local count = 0
         for _, mob in ipairs(enemies:GetChildren()) do
             local info = GetMobInfo(mob)
-            if info.name then
+            local mobHrp = mob:FindFirstChild("HumanoidRootPart")
+            if info.name and mobHrp then
                 count = count + 1
-                print(string.format("[%d] %s | %s", count, info.name, tostring(info.difficulty)))
-                if count >= 20 then break end
+                local dist = myHrp and math.floor((myHrp.Position - mobHrp.Position).Magnitude) or "?"
+                print(string.format("[%d] %s | %s | %sm", count, info.name, tostring(info.difficulty), tostring(dist)))
+                if count >= 30 then break end
             end
         end
     end,
 })
 DebugGroup:AddButton({
-    Text = "Test Priority Match", Func = function()
-        local target = Options.SelectedMob.Value
-        print("\n=== PRIORITY TEST ===")
-        print("Wanted:", target)
-        local enemies = Workspace:FindFirstChild("Enemies")
-        if not enemies then return end
-        for _, mob in ipairs(enemies:GetChildren()) do
-            local info = GetMobInfo(mob)
-            if info.name then
-                local match = NameMatches(info.name, target)
-                print(string.format("Mob: '%s' | Match: %s", info.name, tostring(match)))
+    Text = "Test Priority", Func = function()
+        local val = Options.SelectedMob.Value
+        local wantedList = {}
+        if type(val) == "table" then
+            for name, enabled in pairs(val) do
+                if enabled then table.insert(wantedList, name) end
             end
         end
+        print("\n=== PRIORITY TEST ===")
+        print("Wanted:", table.concat(wantedList, ", "))
+        local enemies = Workspace:FindFirstChild("Enemies")
+        if not enemies then return end
+        local char = LocalPlayer.Character
+        local myHrp = char and char:FindFirstChild("HumanoidRootPart")
+        local matches = 0
+        for _, mob in ipairs(enemies:GetChildren()) do
+            local info = GetMobInfo(mob)
+            local mobHrp = mob:FindFirstChild("HumanoidRootPart")
+            if info.name and mobHrp then
+                local matched = false
+                for _, w in ipairs(wantedList) do
+                    if NameMatches(info.name, w) then matched = true; break end
+                end
+                if matched then
+                    matches = matches + 1
+                    local dist = myHrp and math.floor((myHrp.Position - mobHrp.Position).Magnitude) or "?"
+                    print(string.format("★ %s | %sm", info.name, tostring(dist)))
+                end
+            end
+        end
+        print("Total matches:", matches)
     end,
 })
 
 -- ═══════════════════════════════════════════════════════════
--- INSTANT TARGET
+-- TARGET / POSITIONING
 -- ═══════════════════════════════════════════════════════════
 local currentTarget = nil
 local currentGroup = nil
@@ -614,10 +625,14 @@ local currentGroupSize = 0
 local comboIndex = 1
 local needNewTarget = true
 
-local function invalidateTarget()
+invalidateTarget = function()
     needNewTarget = true
     currentTarget = nil
 end
+
+Toggles.PriorityMob:OnChanged(function() invalidateTarget() end)
+Toggles.FallbackToAny:OnChanged(function() invalidateTarget() end)
+Toggles.SmartGroupFarm:OnChanged(function() invalidateTarget() end)
 
 local currentTargetDiedConn = nil
 local function setCurrentTarget(mob)
@@ -718,7 +733,6 @@ RunService.Heartbeat:Connect(function()
     end
 end)
 
--- Popup hide watchdog
 task.spawn(function()
     while task.wait(0.05) do
         if Library.Unloaded then break end
@@ -730,7 +744,6 @@ task.spawn(function()
     end
 end)
 
--- Fast death detector
 RunService.Heartbeat:Connect(function()
     if Library.Unloaded then return end
     if currentTarget and currentTarget.Parent then
@@ -757,7 +770,7 @@ task.spawn(function()
                 local info = GetMobInfo(currentTarget)
                 TargetInfoLabel:SetText("Target: " .. (info.name or "?") .. " (" .. (info.difficulty or "?") .. ")")
             else
-                TargetInfoLabel:SetText("Target: (none)")
+                TargetInfoLabel:SetText("Target: (searching...)")
             end
         end)
         local q = GetActiveQuest()
@@ -778,7 +791,7 @@ task.spawn(function()
                 Library:Notify({Title="Auto Claim", Description="Claimed!", Time=2})
                 task.wait(2)
             end
-            if Toggles.AutoQuest.Value and Toggles.AutoTeleportToZone.Value and parsed.zoneId then
+            if Toggles.AutoQuest.Value and Toggles.AutoTeleportToZone.Value and parsed.zoneId and not Toggles.PriorityMob.Value then
                 if tick() - lastZoneTeleport > 10 then
                     local hasMatchingMobs = false
                     local enemies = Workspace:FindFirstChild("Enemies")
@@ -806,7 +819,7 @@ task.spawn(function()
     end
 end)
 
--- ATTACK LOOP (with fallback)
+-- ATTACK LOOP
 task.spawn(function()
     while task.wait() do
         if Library.Unloaded then break end
@@ -817,25 +830,40 @@ task.spawn(function()
             if needNewTarget or not currentTarget or not currentTarget.Parent then
                 needNewTarget = false
                 local filter = nil
-                if Toggles.AutoQuest.Value and activeQuestData then
+                local ignoreRange = false
+                
+                if Toggles.PriorityMob.Value then
+                    local val = Options.SelectedMob.Value
+                    if type(val) == "table" then
+                        local hasAny = false
+                        for _, v in pairs(val) do if v then hasAny = true; break end end
+                        if hasAny then
+                            filter = {mobNames = val}
+                            ignoreRange = true
+                        end
+                    elseif type(val) == "string" and val ~= "" then
+                        filter = {mobName = val}
+                        ignoreRange = true
+                    end
+                end
+                
+                if not filter and Toggles.AutoQuest.Value and activeQuestData then
                     filter = {mobName = activeQuestData.mobName, difficulty = activeQuestData.difficulty}
-                elseif Toggles.PriorityMob.Value then
-                    filter = {mobName = Options.SelectedMob.Value}
+                    ignoreRange = true
                 end
                 
                 local mob, group, center
                 if Toggles.SmartGroupFarm.Value then
-                    mob, group, center = GetMobGroup(filter, Options.GroupRadius.Value)
+                    mob, group, center = GetMobGroup(filter, Options.GroupRadius.Value, ignoreRange)
                 else
-                    mob = GetSingleTarget(filter)
+                    mob = GetSingleTarget(filter, ignoreRange)
                 end
                 
-                -- FALLBACK: if no match found and fallback is enabled, farm anything
                 if not mob and Toggles.FallbackToAny.Value and filter then
                     if Toggles.SmartGroupFarm.Value then
-                        mob, group, center = GetMobGroup(nil, Options.GroupRadius.Value)
+                        mob, group, center = GetMobGroup(nil, Options.GroupRadius.Value, false)
                     else
-                        mob = GetSingleTarget(nil)
+                        mob = GetSingleTarget(nil, false)
                     end
                 end
                 
@@ -884,17 +912,12 @@ Toggles.AutoChampionSpin:OnChanged(function()
     if Toggles.AutoChampionSpin.Value then
         local zoneName = Options.ChampionSpinZone.Value
         for i, d in ipairs(ChampionSpinDisplay) do
-            if d == zoneName then
-                Actions.HiddenChampionSpin(ChampionSpinZones[i])
-                Library:Notify({Title="Champions", Description="Started @ "..zoneName, Time=2})
-                break
-            end
+            if d == zoneName then Actions.HiddenChampionSpin(ChampionSpinZones[i]); break end
         end
     else
         Actions.GachaStop("Champions")
         task.wait(0.5)
         ShowSpinPopups()
-        Library:Notify({Title="Champions", Description="Stopped", Time=2})
     end
 end)
 
@@ -912,28 +935,20 @@ end)
 Toggles.AutoHakiGacha:OnChanged(function()
     if Toggles.AutoHakiGacha.Value then
         Actions.HiddenSpin("HakiGacha")
-        Library:Notify({Title="Haki Gacha", Description="Started", Time=2})
     else
         Actions.GachaStop("HakiGacha")
         task.wait(0.5)
-        if not (Toggles.AutoChampionSpin.Value or Toggles.AutoRacesGacha.Value) then
-            ShowSpinPopups()
-        end
-        Library:Notify({Title="Haki Gacha", Description="Stopped", Time=2})
+        if not (Toggles.AutoChampionSpin.Value or Toggles.AutoRacesGacha.Value) then ShowSpinPopups() end
     end
 end)
 
 Toggles.AutoRacesGacha:OnChanged(function()
     if Toggles.AutoRacesGacha.Value then
         Actions.HiddenSpin("RacesGacha")
-        Library:Notify({Title="Races Gacha", Description="Started", Time=2})
     else
         Actions.GachaStop("RacesGacha")
         task.wait(0.5)
-        if not (Toggles.AutoChampionSpin.Value or Toggles.AutoHakiGacha.Value) then
-            ShowSpinPopups()
-        end
-        Library:Notify({Title="Races Gacha", Description="Stopped", Time=2})
+        if not (Toggles.AutoChampionSpin.Value or Toggles.AutoHakiGacha.Value) then ShowSpinPopups() end
     end
 end)
 
@@ -970,7 +985,8 @@ Library:OnUnload(function()
         Actions.GachaStop("HakiGacha")
         Actions.GachaStop("RacesGacha")
         Actions.GachaStop("Champions")
-        ShowSpinPopups()
+        local summon = LocalPlayer.PlayerGui:FindFirstChild("Summon")
+        if summon then summon.Enabled = true end
     end)
 end)
 
@@ -987,7 +1003,6 @@ for _, zone in ipairs(zones) do
         Func = function()
             Actions.Teleport(zone.id)
             invalidateTarget()
-            Library:Notify({Title="TP", Description="→ "..zone.name, Time=2})
         end,
     })
 end
@@ -1021,4 +1036,4 @@ SaveManager:BuildConfigSection(Tabs["UI Settings"])
 ThemeManager:ApplyToTab(Tabs["UI Settings"])
 SaveManager:LoadAutoloadConfig()
 
-Library:Notify({Title="Anime Stars v2.4", Description="Fuzzy match + fallback added!", Time=5})
+Library:Notify({Title="Anime Stars v2.7", Description="Strict name matching!", Time=5})

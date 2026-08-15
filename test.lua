@@ -1,6 +1,6 @@
 -- ═══════════════════════════════════════════════════════════
--- ANIME STARS SCRIPT v1.4
--- Auto Farm + Auto Quest + Auto Hero Detection
+-- ANIME STARS SCRIPT v1.6
+-- Fixed labels + strict boss detection + debug
 -- ═══════════════════════════════════════════════════════════
 
 local repo = "https://raw.githubusercontent.com/deividcomsono/Obsidian/main/"
@@ -19,9 +19,7 @@ local RunService = game:GetService("RunService")
 local LocalPlayer = Players.LocalPlayer
 local Remote = ReplicatedStorage.Shared.Packages.Events.RemoteEvent
 
--- ═══════════════════════════════════════════════════════════
--- HARDCODED SETTINGS (removed from UI)
--- ═══════════════════════════════════════════════════════════
+-- HARDCODED SETTINGS
 local ATTACK_DELAY = 0.05
 local ATTACK_RANGE = 2000
 local HOVER_DISTANCE = 5
@@ -74,7 +72,6 @@ local ZoneDisplayNames = {
     none = "Global",
 }
 
--- Alt names game may use in quest text
 local ZoneAliases = {
     ["shinobi world"] = "desertvillage",
     ["shinobi"] = "desertvillage",
@@ -84,8 +81,8 @@ local ZoneAliases = {
     ["sky"] = "skylands",
     ["skypiea"] = "skylands",
     ["alien planet"] = "alienplanet",
-    ["namekian"] = "alienplanet",
     ["namekian world"] = "alienplanet",
+    ["namekian"] = "alienplanet",
     ["alien"] = "alienplanet",
     ["kingdom of lions"] = "kingdomoflions",
     ["lions"] = "kingdomoflions",
@@ -120,56 +117,41 @@ for id, name in pairs(ZoneDisplayNames) do
 end
 
 -- ═══════════════════════════════════════════════════════════
--- MOB NAME LOOKUP + TARGETING
+-- MOB TARGETING
 -- ═══════════════════════════════════════════════════════════
-local function GetMobRealName(mobModel)
+local function GetMobInfo(mobModel)
     for _, gui in ipairs(LocalPlayer.PlayerGui:GetChildren()) do
         if gui.Name == "Enemy" and gui:IsA("BillboardGui") then
             if gui.Adornee and (gui.Adornee == mobModel or gui.Adornee:IsDescendantOf(mobModel)) then
                 local details = gui:FindFirstChild("details")
                 if details then
                     local title = details:FindFirstChild("title")
-                    if title and title:IsA("TextLabel") then
-                        return title.Text
-                    end
-                end
-            end
-        end
-    end
-    return nil
-end
-
-local function GetMobDifficulty(mobModel)
-    for _, gui in ipairs(LocalPlayer.PlayerGui:GetChildren()) do
-        if gui.Name == "Enemy" and gui:IsA("BillboardGui") then
-            if gui.Adornee and (gui.Adornee == mobModel or gui.Adornee:IsDescendantOf(mobModel)) then
-                local details = gui:FindFirstChild("details")
-                if details then
                     local diff = details:FindFirstChild("difficulty")
-                    if diff and diff:IsA("TextLabel") then
-                        return diff.Text
-                    end
+                    return {
+                        name = title and title:IsA("TextLabel") and title.Text or nil,
+                        difficulty = diff and diff:IsA("TextLabel") and diff.Text or nil,
+                    }
                 end
             end
         end
     end
-    return nil
+    return {name = nil, difficulty = nil}
 end
 
-local function IsBoss(mobModel)
-    local diff = GetMobDifficulty(mobModel)
-    if diff then
-        local lower = diff:lower()
-        if lower:find("boss") or lower:find("ultra") then
+local function IsBossMob(mobModel)
+    local info = GetMobInfo(mobModel)
+    if info.difficulty then
+        local d = info.difficulty:lower():gsub("%s+", "")
+        -- STRICT: only exactly "boss" difficulty counts
+        if d == "boss" then
             return true
         end
     end
-    -- Also check champions folder
-    for zone, champs in pairs(ChampionsByZone) do
-        local realName = GetMobRealName(mobModel)
-        if realName then
-            for _, cName in ipairs(champs) do
-                if cName == realName then return true end
+    -- Any champion counts as a boss too
+    if info.name then
+        for _, champList in pairs(ChampionsByZone) do
+            for _, c in ipairs(champList) do
+                if c == info.name then return true end
             end
         end
     end
@@ -196,12 +178,12 @@ local function GetTargetMob(priorityName, bossOnly)
                 local valid = true
                 
                 if priorityName and priorityName ~= "" then
-                    local realName = GetMobRealName(mob)
-                    valid = realName and realName:lower() == priorityName:lower()
+                    local info = GetMobInfo(mob)
+                    valid = info.name and info.name:lower() == priorityName:lower()
                 end
                 
                 if valid and bossOnly then
-                    valid = IsBoss(mob)
+                    valid = IsBossMob(mob)
                 end
                 
                 if valid then
@@ -231,9 +213,6 @@ function Actions.Teleport(zoneId)
     Remote:FireServer({{Path = "zones/teleport", Params = {zoneId}}})
 end
 
--- ═══════════════════════════════════════════════════════════
--- AUTO HERO DETECTION (uses AnimationPack attribute)
--- ═══════════════════════════════════════════════════════════
 local function GetCurrentHero()
     local char = LocalPlayer.Character
     if char then
@@ -241,35 +220,38 @@ local function GetCurrentHero()
         if heroAttr and heroAttr ~= "" then
             return heroAttr
         end
-        local hum = char:FindFirstChildOfClass("Humanoid")
-        if hum and hum.DisplayName and hum.DisplayName ~= "" then
-            return hum.DisplayName
-        end
     end
     return "Hawk"
 end
 
 -- ═══════════════════════════════════════════════════════════
--- QUEST PARSER
+-- QUEST READER
 -- ═══════════════════════════════════════════════════════════
 local function GetActiveQuest()
-    local hud = LocalPlayer.PlayerGui:FindFirstChild("Main")
-    if not hud then return nil end
-    hud = hud:FindFirstChild("Hud")
+    local pg = LocalPlayer:FindFirstChild("PlayerGui")
+    if not pg then return nil end
+    local main = pg:FindFirstChild("Main")
+    if not main then return nil end
+    local hud = main:FindFirstChild("Hud")
     if not hud then return nil end
     local quest = hud:FindFirstChild("Quest")
     if not quest then return nil end
     
-    local titleLabel = quest:FindFirstChild("Info") and quest.Info:FindFirstChild("Title")
-    local progressLabel = quest:FindFirstChild("Progress") and quest.Progress:FindFirstChild("Label")
+    local info = quest:FindFirstChild("Info")
+    local progress = quest:FindFirstChild("Progress")
     
-    if titleLabel and titleLabel:IsA("TextLabel") then
-        return {
-            title = titleLabel.Text,
-            progress = progressLabel and progressLabel.Text or "",
-        }
-    end
-    return nil
+    local titleLabel = info and info:FindFirstChild("Title")
+    local progressLabel = progress and progress:FindFirstChild("Label")
+    
+    local title = titleLabel and titleLabel:IsA("TextLabel") and titleLabel.Text or ""
+    local prog = progressLabel and progressLabel:IsA("TextLabel") and progressLabel.Text or ""
+    
+    if title == "" then return nil end
+    
+    return {
+        title = title,
+        progress = prog,
+    }
 end
 
 local function ParseQuest(questText)
@@ -284,21 +266,26 @@ local function ParseQuest(questText)
         mobName = nil,
     }
     
-    -- Detect boss requirement
     if lower:find("boss") or lower:find("champion") then
         result.bossOnly = true
     end
     
-    -- Extract zone name (try aliases)
+    -- Sort aliases longest first
+    local sortedAliases = {}
     for alias, zoneId in pairs(ZoneAliases) do
-        if lower:find(alias, 1, true) then
-            result.zoneId = zoneId
-            result.zone = ZoneDisplayNames[zoneId] or zoneId
+        table.insert(sortedAliases, {alias = alias, zoneId = zoneId, len = #alias})
+    end
+    table.sort(sortedAliases, function(a, b) return a.len > b.len end)
+    
+    for _, a in ipairs(sortedAliases) do
+        if lower:find(a.alias, 1, true) then
+            result.zoneId = a.zoneId
+            result.zone = ZoneDisplayNames[a.zoneId] or a.zoneId
             break
         end
     end
     
-    -- Try to detect specific mob name from all known enemies
+    -- Detect specific mob name
     for _, mobList in pairs(EnemiesByZone) do
         for _, mobName in ipairs(mobList) do
             if lower:find(mobName:lower(), 1, true) then
@@ -322,14 +309,14 @@ local function ParseQuest(questText)
 end
 
 -- ═══════════════════════════════════════════════════════════
--- WINDOW SETUP
+-- WINDOW
 -- ═══════════════════════════════════════════════════════════
 Library.ForceCheckbox = false
 Library.ShowToggleFrameInKeybinds = true
 
 local Window = Library:CreateWindow({
     Title = "Anime Stars",
-    Footer = "v1.4",
+    Footer = "v1.6",
     Icon = 95816097006870,
     NotifySide = "Right",
     ShowCustomCursor = true,
@@ -343,14 +330,10 @@ local Tabs = {
     ["UI Settings"] = Window:AddTab("UI Settings", "settings"),
 }
 
--- ═══════════════════════════════════════════════════════════
--- MAIN TAB
--- ═══════════════════════════════════════════════════════════
+-- MAIN
 local MainGroup = Tabs.Main:AddLeftGroupbox("Info", "info")
-MainGroup:AddLabel("Anime Stars Auto Farm v1.4", true)
-MainGroup:AddLabel("Hero auto-detected. Use Auto Quest tab for smart farming.", true)
-
-local HeroDisplayLabel = MainGroup:AddLabel("Current Hero: " .. GetCurrentHero(), true, "HeroDisplay")
+MainGroup:AddLabel("Anime Stars v1.6", true)
+local HeroDisplayLabel = MainGroup:AddLabel("Current Hero: " .. GetCurrentHero(), true)
 
 local PlayerGroup = Tabs.Main:AddRightGroupbox("Server", "server")
 PlayerGroup:AddButton({
@@ -360,40 +343,18 @@ PlayerGroup:AddButton({
     end,
 })
 
--- ═══════════════════════════════════════════════════════════
--- AUTO FARM TAB (Cleaned up)
--- ═══════════════════════════════════════════════════════════
+-- AUTO FARM
 local FarmGroup = Tabs.Farm:AddLeftGroupbox("Auto Farm", "swords")
-
-FarmGroup:AddToggle("AutoAttack", {
-    Text = "Auto Attack",
-    Default = false,
-})
-
-FarmGroup:AddToggle("UseAnchor", {
-    Text = "Anchor Mode (max stability)",
-    Default = false,
-})
-
+FarmGroup:AddToggle("AutoAttack", { Text = "Auto Attack", Default = false })
+FarmGroup:AddToggle("UseAnchor", { Text = "Anchor Mode", Default = false })
 FarmGroup:AddDivider()
-
 FarmGroup:AddToggle("AutoSkill", { Text = "Auto Skill", Default = false })
-FarmGroup:AddSlider("SkillDelay", {
-    Text = "Skill Delay", Default = 5, Min = 1, Max = 30, Rounding = 1, Suffix = "s",
-})
-
+FarmGroup:AddSlider("SkillDelay", { Text = "Skill Delay", Default = 5, Min = 1, Max = 30, Rounding = 1, Suffix = "s" })
 FarmGroup:AddToggle("AutoUltimate", { Text = "Auto Ultimate", Default = false })
-FarmGroup:AddSlider("UltimateDelay", {
-    Text = "Ultimate Delay", Default = 15, Min = 5, Max = 60, Rounding = 1, Suffix = "s",
-})
+FarmGroup:AddSlider("UltimateDelay", { Text = "Ultimate Delay", Default = 15, Min = 5, Max = 60, Rounding = 1, Suffix = "s" })
 
--- TARGET FILTER
 local TargetGroup = Tabs.Farm:AddRightGroupbox("Target Filter", "target")
-
-TargetGroup:AddToggle("PriorityMob", {
-    Text = "Prioritize Specific Mob",
-    Default = false,
-})
+TargetGroup:AddToggle("PriorityMob", { Text = "Prioritize Specific Mob", Default = false })
 
 TargetGroup:AddDropdown("SelectedZone", {
     Values = ZoneList,
@@ -419,27 +380,24 @@ TargetGroup:AddDropdown("SelectedMob", {
     Searchable = true,
 })
 
--- ═══════════════════════════════════════════════════════════
--- AUTO QUEST TAB
--- ═══════════════════════════════════════════════════════════
+-- AUTO QUEST
 local QuestGroup = Tabs.Quest:AddLeftGroupbox("Auto Quest", "scroll-text")
 
 QuestGroup:AddToggle("AutoQuest", {
-    Text = "Auto Quest (Reads HUD)",
+    Text = "Auto Quest",
     Default = false,
-    Tooltip = "Reads active quest, teleports to zone, farms correct mob type",
+    Tooltip = "Reads active quest, teleports & farms correct mobs",
 })
 
 QuestGroup:AddToggle("AutoTeleportToZone", {
-    Text = "Auto Teleport to Quest Zone",
+    Text = "Auto Teleport to Zone",
     Default = true,
 })
 
-QuestGroup:AddLabel("Current Quest Info:", true)
-local questTitleLabel = QuestGroup:AddLabel("Quest: (none)", true, "QuestTitle")
-local questProgressLabel = QuestGroup:AddLabel("Progress: -", true, "QuestProgress")
-local questZoneLabel = QuestGroup:AddLabel("Zone: -", true, "QuestZone")
-local questTargetLabel = QuestGroup:AddLabel("Target: -", true, "QuestTarget")
+local QuestTitleLabel = QuestGroup:AddLabel("Quest: (waiting...)", true)
+local QuestProgressLabel = QuestGroup:AddLabel("Progress: -", true)
+local QuestZoneLabel = QuestGroup:AddLabel("Zone: -", true)
+local QuestTargetLabel = QuestGroup:AddLabel("Target: -", true)
 
 QuestGroup:AddButton({
     Text = "Refresh Quest Info",
@@ -447,19 +405,41 @@ QuestGroup:AddButton({
         local q = GetActiveQuest()
         if q then
             local parsed = ParseQuest(q.title)
-            Options.QuestTitle:SetText("Quest: " .. q.title)
-            Options.QuestProgress:SetText("Progress: " .. q.progress)
-            Options.QuestZone:SetText("Zone: " .. (parsed.zone or "Unknown"))
+            QuestTitleLabel:SetText("Quest: " .. q.title)
+            QuestProgressLabel:SetText("Progress: " .. q.progress)
+            QuestZoneLabel:SetText("Zone: " .. (parsed.zone or "Unknown"))
             local target = parsed.mobName or (parsed.bossOnly and "Any Boss" or "Any Enemy")
-            Options.QuestTarget:SetText("Target: " .. target)
+            QuestTargetLabel:SetText("Target: " .. target)
         else
-            Options.QuestTitle:SetText("Quest: (none active)")
+            QuestTitleLabel:SetText("Quest: (none detected)")
         end
     end,
 })
 
-local QuestSpyGroup = Tabs.Quest:AddRightGroupbox("Debug", "bug")
-QuestSpyGroup:AddButton({
+local DebugGroup = Tabs.Quest:AddRightGroupbox("Debug", "bug")
+
+DebugGroup:AddButton({
+    Text = "Scan Nearby Mobs",
+    Func = function()
+        local enemies = Workspace:FindFirstChild("Enemies")
+        if not enemies then return end
+        print("\n=== NEARBY MOB SCAN ===")
+        local count = 0
+        for _, mob in ipairs(enemies:GetChildren()) do
+            local info = GetMobInfo(mob)
+            local isBoss = IsBossMob(mob)
+            if info.name then
+                count = count + 1
+                print(string.format("[%d] %s | Difficulty: %s | IsBoss: %s", 
+                    count, info.name, tostring(info.difficulty), tostring(isBoss)))
+                if count >= 15 then break end
+            end
+        end
+        Library:Notify({Title="Scan Done", Description="Check console (F9)", Time=3})
+    end,
+})
+
+DebugGroup:AddButton({
     Text = "Run Remote Spy (20s)",
     Func = function()
         Library:Notify({Title="Spy Started", Description="Do actions now!", Time=5})
@@ -493,7 +473,7 @@ QuestSpyGroup:AddButton({
 })
 
 -- ═══════════════════════════════════════════════════════════
--- SMOOTH POSITIONING
+-- POSITIONING
 -- ═══════════════════════════════════════════════════════════
 local currentTarget = nil
 local comboIndex = 1
@@ -569,7 +549,7 @@ RunService.Heartbeat:Connect(function()
 end)
 
 -- ═══════════════════════════════════════════════════════════
--- AUTO QUEST LOGIC
+-- QUEST LOOP
 -- ═══════════════════════════════════════════════════════════
 local activeQuestData = nil
 local lastZoneTeleport = 0
@@ -578,22 +558,25 @@ task.spawn(function()
     while task.wait(2) do
         if Library.Unloaded then break end
         
+        pcall(function()
+            HeroDisplayLabel:SetText("Current Hero: " .. GetCurrentHero())
+        end)
+        
         local q = GetActiveQuest()
-        if q and q.title and q.title ~= "" then
+        if q then
             local parsed = ParseQuest(q.title)
             activeQuestData = parsed
             
-            -- Update UI labels
-            Options.QuestTitle:SetText("Quest: " .. q.title)
-            Options.QuestProgress:SetText("Progress: " .. q.progress)
-            Options.QuestZone:SetText("Zone: " .. (parsed.zone or "Unknown"))
-            local target = parsed.mobName or (parsed.bossOnly and "Any Boss" or "Any Enemy")
-            Options.QuestTarget:SetText("Target: " .. target)
+            pcall(function()
+                QuestTitleLabel:SetText("Quest: " .. q.title)
+                QuestProgressLabel:SetText("Progress: " .. q.progress)
+                QuestZoneLabel:SetText("Zone: " .. (parsed.zone or "Unknown"))
+                local target = parsed.mobName or (parsed.bossOnly and "Any Boss" or "Any Enemy")
+                QuestTargetLabel:SetText("Target: " .. target)
+            end)
             
-            -- Auto teleport if enabled and in wrong zone
             if Toggles.AutoQuest.Value and Toggles.AutoTeleportToZone.Value and parsed.zoneId then
                 if tick() - lastZoneTeleport > 15 then
-                    -- Only teleport if we don't see any mobs (rough heuristic for "wrong zone")
                     local enemies = Workspace:FindFirstChild("Enemies")
                     local hasEnemies = enemies and #enemies:GetChildren() > 0
                     if not hasEnemies then
@@ -605,15 +588,16 @@ task.spawn(function()
             end
         else
             activeQuestData = nil
-            Options.QuestTitle:SetText("Quest: (none active)")
+            pcall(function()
+                QuestTitleLabel:SetText("Quest: (none detected)")
+            end)
         end
-        
-        -- Update hero display
-        Options.HeroDisplay:SetText("Current Hero: " .. GetCurrentHero())
     end
 end)
 
+-- ═══════════════════════════════════════════════════════════
 -- ATTACK LOOP
+-- ═══════════════════════════════════════════════════════════
 task.spawn(function()
     while task.wait() do
         if Library.Unloaded then break end
@@ -660,7 +644,6 @@ task.spawn(function()
     end
 end)
 
--- SKILL LOOP
 task.spawn(function()
     while task.wait(0.5) do
         if Library.Unloaded then break end
@@ -671,7 +654,6 @@ task.spawn(function()
     end
 end)
 
--- ULTIMATE LOOP
 task.spawn(function()
     while task.wait(0.5) do
         if Library.Unloaded then break end
@@ -682,16 +664,13 @@ task.spawn(function()
     end
 end)
 
--- Unanchor safety on respawn
 LocalPlayer.CharacterAdded:Connect(function(char)
     task.wait(0.5)
     local hrp = char:WaitForChild("HumanoidRootPart", 5)
     if hrp then hrp.Anchored = false end
 end)
 
--- ═══════════════════════════════════════════════════════════
--- TELEPORT TAB
--- ═══════════════════════════════════════════════════════════
+-- TELEPORT
 local TeleportGroup = Tabs.Teleport:AddLeftGroupbox("Zones", "map-pin")
 local zones = {
     {name = "Lobby", id = "lobby"},
@@ -712,9 +691,7 @@ for _, zone in ipairs(zones) do
     })
 end
 
--- ═══════════════════════════════════════════════════════════
 -- UI SETTINGS
--- ═══════════════════════════════════════════════════════════
 local MenuGroup = Tabs["UI Settings"]:AddLeftGroupbox("Menu", "wrench")
 MenuGroup:AddToggle("KeybindMenuOpen", {
     Default = Library.KeybindFrame.Visible, Text = "Open Keybind Menu",
@@ -743,4 +720,4 @@ SaveManager:BuildConfigSection(Tabs["UI Settings"])
 ThemeManager:ApplyToTab(Tabs["UI Settings"])
 SaveManager:LoadAutoloadConfig()
 
-Library:Notify({Title="Anime Stars v1.4", Description="Auto Quest + Auto Hero", Time=5})
+Library:Notify({Title="Anime Stars v1.6", Description="Fixed labels + strict boss", Time=5})

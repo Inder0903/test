@@ -1,6 +1,6 @@
 -- ═══════════════════════════════════════════════════════════
--- ANIME STARS SCRIPT v1.6
--- Fixed labels + strict boss detection + debug
+-- ANIME STARS SCRIPT v1.7
+-- Full Auto Quest Loop + Difficulty Filter + Auto Claim
 -- ═══════════════════════════════════════════════════════════
 
 local repo = "https://raw.githubusercontent.com/deividcomsono/Obsidian/main/"
@@ -15,6 +15,7 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
 local RunService = game:GetService("RunService")
+local VirtualUser = game:GetService("VirtualUser")
 
 local LocalPlayer = Players.LocalPlayer
 local Remote = ReplicatedStorage.Shared.Packages.Events.RemoteEvent
@@ -25,7 +26,7 @@ local ATTACK_RANGE = 2000
 local HOVER_DISTANCE = 5
 
 -- ═══════════════════════════════════════════════════════════
--- MOB / CHAMPION DATA
+-- DATA
 -- ═══════════════════════════════════════════════════════════
 local function GetEnemiesByZone()
     local dir = ReplicatedStorage.Shared.Directory.Enemies._Index
@@ -78,7 +79,6 @@ local ZoneAliases = {
     ["desert village"] = "desertvillage",
     ["desert"] = "desertvillage",
     ["skylands"] = "skylands",
-    ["sky"] = "skylands",
     ["skypiea"] = "skylands",
     ["alien planet"] = "alienplanet",
     ["namekian world"] = "alienplanet",
@@ -117,7 +117,7 @@ for id, name in pairs(ZoneDisplayNames) do
 end
 
 -- ═══════════════════════════════════════════════════════════
--- MOB TARGETING
+-- MOB TARGETING (with difficulty filter)
 -- ═══════════════════════════════════════════════════════════
 local function GetMobInfo(mobModel)
     for _, gui in ipairs(LocalPlayer.PlayerGui:GetChildren()) do
@@ -138,27 +138,46 @@ local function GetMobInfo(mobModel)
     return {name = nil, difficulty = nil}
 end
 
-local function IsBossMob(mobModel)
-    local info = GetMobInfo(mobModel)
-    if info.difficulty then
-        local d = info.difficulty:lower():gsub("%s+", "")
-        -- STRICT: only exactly "boss" difficulty counts
-        if d == "boss" then
-            return true
-        end
-    end
-    -- Any champion counts as a boss too
-    if info.name then
-        for _, champList in pairs(ChampionsByZone) do
-            for _, c in ipairs(champList) do
-                if c == info.name then return true end
-            end
+local function NormDiff(str)
+    if not str then return nil end
+    return str:lower():gsub("%s+", "")
+end
+
+local function IsChampion(mobName)
+    for _, champList in pairs(ChampionsByZone) do
+        for _, c in ipairs(champList) do
+            if c == mobName then return true end
         end
     end
     return false
 end
 
-local function GetTargetMob(priorityName, bossOnly)
+local function MatchesFilter(mobModel, filter)
+    if not filter then return true end
+    local info = GetMobInfo(mobModel)
+    
+    -- Filter by specific mob name
+    if filter.mobName and info.name then
+        return info.name:lower() == filter.mobName:lower()
+    end
+    
+    -- Filter by difficulty
+    if filter.difficulty then
+        local wanted = NormDiff(filter.difficulty)
+        local actual = NormDiff(info.difficulty)
+        if wanted == "boss" then
+            -- Boss = "Boss" difficulty OR any champion
+            if actual == "boss" then return true end
+            if info.name and IsChampion(info.name) then return true end
+            return false
+        end
+        return actual == wanted
+    end
+    
+    return true
+end
+
+local function GetTargetMob(filter)
     local char = LocalPlayer.Character
     if not char then return nil end
     local hrp = char:FindFirstChild("HumanoidRootPart")
@@ -174,22 +193,9 @@ local function GetTargetMob(priorityName, bossOnly)
         local hum = mob:FindFirstChildOfClass("Humanoid")
         if mobHrp and hum and hum.Health > 0 then
             local dist = (hrp.Position - mobHrp.Position).Magnitude
-            if dist < closestDist then
-                local valid = true
-                
-                if priorityName and priorityName ~= "" then
-                    local info = GetMobInfo(mob)
-                    valid = info.name and info.name:lower() == priorityName:lower()
-                end
-                
-                if valid and bossOnly then
-                    valid = IsBossMob(mob)
-                end
-                
-                if valid then
-                    closest = mob
-                    closestDist = dist
-                end
+            if dist < closestDist and MatchesFilter(mob, filter) then
+                closest = mob
+                closestDist = dist
             end
         end
     end
@@ -217,15 +223,13 @@ local function GetCurrentHero()
     local char = LocalPlayer.Character
     if char then
         local heroAttr = char:GetAttribute("AnimationPack")
-        if heroAttr and heroAttr ~= "" then
-            return heroAttr
-        end
+        if heroAttr and heroAttr ~= "" then return heroAttr end
     end
     return "Hawk"
 end
 
 -- ═══════════════════════════════════════════════════════════
--- QUEST READER
+-- QUEST READER + PARSER
 -- ═══════════════════════════════════════════════════════════
 local function GetActiveQuest()
     local pg = LocalPlayer:FindFirstChild("PlayerGui")
@@ -239,20 +243,35 @@ local function GetActiveQuest()
     
     local info = quest:FindFirstChild("Info")
     local progress = quest:FindFirstChild("Progress")
+    local claim = quest:FindFirstChild("Claim")
     
     local titleLabel = info and info:FindFirstChild("Title")
     local progressLabel = progress and progress:FindFirstChild("Label")
+    local claimBtn = claim and claim:FindFirstChild("Button")
     
     local title = titleLabel and titleLabel:IsA("TextLabel") and titleLabel.Text or ""
     local prog = progressLabel and progressLabel:IsA("TextLabel") and progressLabel.Text or ""
+    local canClaim = claim and claim.Visible or false
     
     if title == "" then return nil end
     
     return {
         title = title,
         progress = prog,
+        canClaim = canClaim,
+        claimButton = claimBtn,
     }
 end
+
+local DIFFICULTY_KEYWORDS = {
+    ["ultra hard"] = "ultrahard",
+    ["ultra"] = "ultrahard",
+    ["hard"] = "hard",
+    ["medium"] = "medium",
+    ["easy"] = "easy",
+    ["boss"] = "boss",
+    ["champion"] = "boss",
+}
 
 local function ParseQuest(questText)
     if not questText or questText == "" then return nil end
@@ -262,15 +281,20 @@ local function ParseQuest(questText)
         text = questText,
         zone = nil,
         zoneId = nil,
-        bossOnly = false,
+        difficulty = nil,
         mobName = nil,
     }
     
-    if lower:find("boss") or lower:find("champion") then
-        result.bossOnly = true
+    -- Detect difficulty (longest match first)
+    local diffOrder = {"ultra hard", "ultra", "hard", "medium", "easy", "boss", "champion"}
+    for _, keyword in ipairs(diffOrder) do
+        if lower:find(keyword, 1, true) then
+            result.difficulty = DIFFICULTY_KEYWORDS[keyword]
+            break
+        end
     end
     
-    -- Sort aliases longest first
+    -- Detect zone (longest alias first)
     local sortedAliases = {}
     for alias, zoneId in pairs(ZoneAliases) do
         table.insert(sortedAliases, {alias = alias, zoneId = zoneId, len = #alias})
@@ -308,6 +332,35 @@ local function ParseQuest(questText)
     return result
 end
 
+-- Detect current zone (by teleport tracking)
+local currentZone = "lobby"
+
+local function ClickClaimButton()
+    local q = GetActiveQuest()
+    if q and q.canClaim and q.claimButton then
+        -- Try multiple methods
+        local btn = q.claimButton
+        pcall(function()
+            if firesignal then
+                firesignal(btn.MouseButton1Click)
+                firesignal(btn.Activated)
+            end
+        end)
+        pcall(function()
+            btn:CaptureFocus()
+        end)
+        -- VirtualInput fallback
+        pcall(function()
+            local pos = btn.AbsolutePosition + btn.AbsoluteSize/2
+            VirtualUser:Button1Down(pos)
+            task.wait(0.05)
+            VirtualUser:Button1Up(pos)
+        end)
+        return true
+    end
+    return false
+end
+
 -- ═══════════════════════════════════════════════════════════
 -- WINDOW
 -- ═══════════════════════════════════════════════════════════
@@ -316,7 +369,7 @@ Library.ShowToggleFrameInKeybinds = true
 
 local Window = Library:CreateWindow({
     Title = "Anime Stars",
-    Footer = "v1.6",
+    Footer = "v1.7",
     Icon = 95816097006870,
     NotifySide = "Right",
     ShowCustomCursor = true,
@@ -332,7 +385,7 @@ local Tabs = {
 
 -- MAIN
 local MainGroup = Tabs.Main:AddLeftGroupbox("Info", "info")
-MainGroup:AddLabel("Anime Stars v1.6", true)
+MainGroup:AddLabel("Anime Stars v1.7", true)
 local HeroDisplayLabel = MainGroup:AddLabel("Current Hero: " .. GetCurrentHero(), true)
 
 local PlayerGroup = Tabs.Main:AddRightGroupbox("Server", "server")
@@ -381,23 +434,23 @@ TargetGroup:AddDropdown("SelectedMob", {
 })
 
 -- AUTO QUEST
-local QuestGroup = Tabs.Quest:AddLeftGroupbox("Auto Quest", "scroll-text")
+local QuestGroup = Tabs.Quest:AddLeftGroupbox("Auto Quest (Full Loop)", "scroll-text")
 
 QuestGroup:AddToggle("AutoQuest", {
     Text = "Auto Quest",
     Default = false,
-    Tooltip = "Reads active quest, teleports & farms correct mobs",
+    Tooltip = "Full loop: farm → claim → new quest → repeat",
 })
 
-QuestGroup:AddToggle("AutoTeleportToZone", {
-    Text = "Auto Teleport to Zone",
-    Default = true,
-})
+QuestGroup:AddToggle("AutoTeleportToZone", { Text = "Auto Teleport to Zone", Default = true })
+QuestGroup:AddToggle("AutoClaim", { Text = "Auto Claim Quests", Default = true })
 
 local QuestTitleLabel = QuestGroup:AddLabel("Quest: (waiting...)", true)
 local QuestProgressLabel = QuestGroup:AddLabel("Progress: -", true)
 local QuestZoneLabel = QuestGroup:AddLabel("Zone: -", true)
+local QuestDiffLabel = QuestGroup:AddLabel("Difficulty: -", true)
 local QuestTargetLabel = QuestGroup:AddLabel("Target: -", true)
+local QuestClaimLabel = QuestGroup:AddLabel("Claim Ready: No", true)
 
 QuestGroup:AddButton({
     Text = "Refresh Quest Info",
@@ -408,11 +461,19 @@ QuestGroup:AddButton({
             QuestTitleLabel:SetText("Quest: " .. q.title)
             QuestProgressLabel:SetText("Progress: " .. q.progress)
             QuestZoneLabel:SetText("Zone: " .. (parsed.zone or "Unknown"))
-            local target = parsed.mobName or (parsed.bossOnly and "Any Boss" or "Any Enemy")
+            QuestDiffLabel:SetText("Difficulty: " .. (parsed.difficulty or "Any"))
+            local target = parsed.mobName or "Any"
             QuestTargetLabel:SetText("Target: " .. target)
-        else
-            QuestTitleLabel:SetText("Quest: (none detected)")
+            QuestClaimLabel:SetText("Claim Ready: " .. (q.canClaim and "YES" or "No"))
         end
+    end,
+})
+
+QuestGroup:AddButton({
+    Text = "Manual Claim Now",
+    Func = function()
+        local ok = ClickClaimButton()
+        Library:Notify({Title="Claim", Description=ok and "Clicked!" or "Nothing to claim", Time=3})
     end,
 })
 
@@ -427,11 +488,10 @@ DebugGroup:AddButton({
         local count = 0
         for _, mob in ipairs(enemies:GetChildren()) do
             local info = GetMobInfo(mob)
-            local isBoss = IsBossMob(mob)
             if info.name then
                 count = count + 1
-                print(string.format("[%d] %s | Difficulty: %s | IsBoss: %s", 
-                    count, info.name, tostring(info.difficulty), tostring(isBoss)))
+                print(string.format("[%d] %s | Difficulty: %s | Champion: %s", 
+                    count, info.name, tostring(info.difficulty), tostring(IsChampion(info.name))))
                 if count >= 15 then break end
             end
         end
@@ -440,24 +500,24 @@ DebugGroup:AddButton({
 })
 
 DebugGroup:AddButton({
-    Text = "Run Remote Spy (20s)",
+    Text = "Remote Spy (30s)",
     Func = function()
-        Library:Notify({Title="Spy Started", Description="Do actions now!", Time=5})
+        Library:Notify({Title="Spy Started", Description="Do actions!", Time=3})
         local mt = getrawmetatable(game)
         setreadonly(mt, false)
-        local captured = {}
+        local seen = {}
         local oldNamecall
         oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
             if self == Remote and getnamecallmethod() == "FireServer" then
                 local args = {...}
                 if args[1] and type(args[1]) == "table" then
                     for _, entry in ipairs(args[1]) do
-                        if entry.Path and not captured[entry.Path] then
-                            captured[entry.Path] = true
-                            print("[SPY] Path:", entry.Path)
+                        if entry.Path and not seen[entry.Path] then
+                            seen[entry.Path] = true
+                            print("[SPY]", entry.Path)
                             if entry.Params then
                                 for i, p in ipairs(entry.Params) do
-                                    print("  Param", i, ":", tostring(p))
+                                    print("  P" .. i .. ":", tostring(p))
                                 end
                             end
                         end
@@ -466,9 +526,9 @@ DebugGroup:AddButton({
             end
             return oldNamecall(self, ...)
         end)
-        task.wait(20)
+        task.wait(30)
         hookmetamethod(game, "__namecall", oldNamecall)
-        Library:Notify({Title="Spy Ended", Description="Check console (F9)", Time=3})
+        Library:Notify({Title="Spy Ended", Description="Check F9", Time=3})
     end,
 })
 
@@ -549,13 +609,13 @@ RunService.Heartbeat:Connect(function()
 end)
 
 -- ═══════════════════════════════════════════════════════════
--- QUEST LOOP
+-- QUEST LOOP (reads + auto claims + auto teleports)
 -- ═══════════════════════════════════════════════════════════
 local activeQuestData = nil
 local lastZoneTeleport = 0
 
 task.spawn(function()
-    while task.wait(2) do
+    while task.wait(1.5) do
         if Library.Unloaded then break end
         
         pcall(function()
@@ -571,16 +631,39 @@ task.spawn(function()
                 QuestTitleLabel:SetText("Quest: " .. q.title)
                 QuestProgressLabel:SetText("Progress: " .. q.progress)
                 QuestZoneLabel:SetText("Zone: " .. (parsed.zone or "Unknown"))
-                local target = parsed.mobName or (parsed.bossOnly and "Any Boss" or "Any Enemy")
-                QuestTargetLabel:SetText("Target: " .. target)
+                QuestDiffLabel:SetText("Difficulty: " .. (parsed.difficulty or "Any"))
+                QuestTargetLabel:SetText("Target: " .. (parsed.mobName or "Any"))
+                QuestClaimLabel:SetText("Claim Ready: " .. (q.canClaim and "YES ✓" or "No"))
             end)
             
+            -- Auto Claim
+            if Toggles.AutoQuest.Value and Toggles.AutoClaim.Value and q.canClaim then
+                task.wait(0.5)
+                ClickClaimButton()
+                Library:Notify({Title="Auto Claim", Description="Quest claimed!", Time=2})
+                task.wait(2) -- wait for next quest to load
+            end
+            
+            -- Auto Teleport when in wrong zone
             if Toggles.AutoQuest.Value and Toggles.AutoTeleportToZone.Value and parsed.zoneId then
-                if tick() - lastZoneTeleport > 15 then
+                if tick() - lastZoneTeleport > 10 then
+                    -- Check if we should teleport (only if no matching mobs nearby)
+                    local hasMatchingMobs = false
                     local enemies = Workspace:FindFirstChild("Enemies")
-                    local hasEnemies = enemies and #enemies:GetChildren() > 0
-                    if not hasEnemies then
+                    if enemies then
+                        local filter = {mobName = parsed.mobName, difficulty = parsed.difficulty}
+                        for _, mob in ipairs(enemies:GetChildren()) do
+                            local hum = mob:FindFirstChildOfClass("Humanoid")
+                            if hum and hum.Health > 0 and MatchesFilter(mob, filter) then
+                                hasMatchingMobs = true
+                                break
+                            end
+                        end
+                    end
+                    
+                    if not hasMatchingMobs then
                         Actions.Teleport(parsed.zoneId)
+                        currentZone = parsed.zoneId
                         lastZoneTeleport = tick()
                         Library:Notify({Title="Auto Quest", Description="TP → "..parsed.zone, Time=3})
                     end
@@ -616,17 +699,18 @@ task.spawn(function()
             end
             
             if needNewTarget then
-                local priority = nil
-                local bossOnly = false
+                local filter = nil
                 
                 if Toggles.AutoQuest.Value and activeQuestData then
-                    priority = activeQuestData.mobName
-                    bossOnly = activeQuestData.bossOnly
+                    filter = {
+                        mobName = activeQuestData.mobName,
+                        difficulty = activeQuestData.difficulty,
+                    }
                 elseif Toggles.PriorityMob.Value then
-                    priority = Options.SelectedMob.Value
+                    filter = {mobName = Options.SelectedMob.Value}
                 end
                 
-                currentTarget = GetTargetMob(priority, bossOnly)
+                currentTarget = GetTargetMob(filter)
                 comboIndex = 1
             end
             
@@ -720,4 +804,4 @@ SaveManager:BuildConfigSection(Tabs["UI Settings"])
 ThemeManager:ApplyToTab(Tabs["UI Settings"])
 SaveManager:LoadAutoloadConfig()
 
-Library:Notify({Title="Anime Stars v1.6", Description="Fixed labels + strict boss", Time=5})
+Library:Notify({Title="Anime Stars v1.7", Description="Full Auto Quest Loop!", Time=5})

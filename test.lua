@@ -1,5 +1,5 @@
 -- ═══════════════════════════════════════════════════════════
--- ANIME STARS SCRIPT v3.1 - MacLib UI + Proper Quest System
+-- ANIME STARS SCRIPT v4.1 - EnemiesManager + Data-Driven Quests
 -- ═══════════════════════════════════════════════════════════
 
 local MacLib = loadstring(game:HttpGet("https://github.com/biggaboy212/Maclib/releases/latest/download/maclib.txt"))()
@@ -22,10 +22,34 @@ LocalPlayer.Idled:Connect(function()
 end)
 
 -- ═══════════════════════════════════════════════════════════
--- QUEST DATA LOADER (reads directly from game modules)
+-- LOAD GAME MODULES
 -- ═══════════════════════════════════════════════════════════
+local ProfileManager, QuestUtils, QuestsDirectory, EnemiesManager, EnemiesDir, ZonesManager
 
--- Target string → internal difficulty tag used in MatchesFilter
+do
+    local ok, mod = pcall(require, ReplicatedStorage.Client.General.ProfileManager)
+    if ok then ProfileManager = mod else warn("[v4.1] ProfileManager failed:", mod) end
+
+    local ok2, mod2 = pcall(require, ReplicatedStorage.Client.Utils.QuestUtils)
+    if ok2 then QuestUtils = mod2 else warn("[v4.1] QuestUtils failed:", mod2) end
+
+    local ok3, mod3 = pcall(require, ReplicatedStorage.Shared.Directory.Quests)
+    if ok3 then QuestsDirectory = mod3 else warn("[v4.1] Quests dir failed:", mod3) end
+
+    local ok4, mod4 = pcall(require, ReplicatedStorage.Client.Zones.EnemiesManager)
+    if ok4 then EnemiesManager = mod4 else warn("[v4.1] EnemiesManager failed:", mod4) end
+
+    local ok5, mod5 = pcall(require, ReplicatedStorage.Shared.Directory.Enemies)
+    if ok5 then EnemiesDir = mod5 else warn("[v4.1] Enemies dir failed:", mod5) end
+
+    local ok6, mod6 = pcall(function()
+        local m = ReplicatedStorage.Client:FindFirstChild("Zones")
+        if m then m = m:FindFirstChild("ZonesManager") end
+        return m and require(m)
+    end)
+    if ok6 then ZonesManager = mod6 end
+end
+
 local DIFFICULTY_MAP = {
     ["Easy"]       = "easy",
     ["Medium"]     = "medium",
@@ -34,51 +58,22 @@ local DIFFICULTY_MAP = {
     ["Boss"]       = "boss",
 }
 
--- Loads every quest line from every island module under Quests._Index
-local function LoadAllQuests()
-    local result = {}   -- array of quest line tables
-    local dir = ReplicatedStorage.Shared.Directory.Quests:FindFirstChild("_Index")
-    if not dir then return result end
-
-    local function recurse(folder)
-        for _, child in ipairs(folder:GetChildren()) do
-            if child:IsA("ModuleScript") then
-                local ok, data = pcall(require, child)
-                if ok and type(data) == "table" and type(data.Quests) == "table" then
-                    for idx, quest in ipairs(data.Quests) do
-                        -- Build a unique key matching the requirement format
-                        -- e.g. "MissionsAlienPlanet_1"
-                        local key = child.Name .. "_" .. idx
-                        table.insert(result, {
-                            key         = key,
-                            name        = quest.Name,
-                            description = quest.Description,
-                            zone        = data.ZoneRestriction,   -- e.g. "alienplanet"
-                            category    = data.Category,
-                            objective   = quest.Objective,        -- {Type, Target, TargetZone, Goal}
-                            requirements= quest.Requirements or {},
-                            rewards     = quest.Rewards or {},
-                            moduleIndex = idx,
-                        })
-                    end
-                end
-            elseif child:IsA("Folder") then
-                recurse(child)
-            end
-        end
-    end
-
-    recurse(dir)
-    return result
-end
+-- Reverse map: config difficulty tag → internal
+-- The config's Difficulty field might be same strings or different
+local CONFIG_DIFF_MAP = {
+    ["Easy"]      = "easy",   ["easy"]      = "easy",
+    ["Medium"]    = "medium", ["medium"]    = "medium",
+    ["Hard"]      = "hard",   ["hard"]      = "hard",
+    ["UltraHard"] = "ultrahard", ["Ultra Hard"] = "ultrahard", ["ultrahard"] = "ultrahard",
+    ["Boss"]      = "boss",   ["boss"]      = "boss",
+    ["Champion"]  = "boss",   ["champion"]  = "boss",
+}
 
 -- ═══════════════════════════════════════════════════════════
 -- DYNAMIC DATA LOADERS
 -- ═══════════════════════════════════════════════════════════
 local function LoadZones()
-    local zones   = {}
-    local nameToId = {}
-    local aliases  = {}
+    local zones, nameToId = {}, {}
     local dir = ReplicatedStorage.Shared.Directory.Zones:FindFirstChild("_Index")
     if dir then
         for _, zoneModule in ipairs(dir:GetChildren()) do
@@ -87,24 +82,13 @@ local function LoadZones()
                 local id      = data._id or zoneModule.Name
                 local display = data.DisplayName or id
                 local order   = data.Order or 99
-                table.insert(zones, { id=id, display=display, order=order, cost=data.Cost or 0 })
-                nameToId[display]          = id
-                aliases[display:lower()]   = id
-                aliases[id:lower()]        = id
-                for word in display:lower():gmatch("%S+") do
-                    if #word >= 4 then aliases[word] = id end
-                end
+                table.insert(zones, { id=id, display=display, order=order })
+                nameToId[display] = id
             end
         end
     end
     table.sort(zones, function(a,b) return a.order < b.order end)
-    aliases["shinobi world"]  = "desertvillage"
-    aliases["shinobi"]        = "desertvillage"
-    aliases["namekian world"] = "alienplanet"
-    aliases["namekian"]       = "alienplanet"
-    aliases["skypiea"]        = "skylands"
-    aliases["sky"]            = "skylands"
-    return zones, nameToId, aliases
+    return zones, nameToId
 end
 
 local function LoadGachas()
@@ -170,18 +154,14 @@ local function LoadBanners()
     return result
 end
 
--- Load everything
-local ZoneData, ZoneNameToId, ZoneAliases = LoadZones()
-local GachaData     = LoadGachas()
-local BannerData    = LoadBanners()
+local ZoneData, ZoneNameToId = LoadZones()
+local GachaData       = LoadGachas()
+local BannerData      = LoadBanners()
 local EnemiesByZone   = GetEnemiesByZone()
 local ChampionsByZone = GetChampionsByZone()
-local AllQuestLines   = LoadAllQuests()
 
 local ZoneDisplayNames = {}
-for _, z in ipairs(ZoneData) do
-    ZoneDisplayNames[z.id] = z.display
-end
+for _, z in ipairs(ZoneData) do ZoneDisplayNames[z.id] = z.display end
 
 local AllByZone = {}
 for zone, mobs in pairs(EnemiesByZone) do
@@ -200,8 +180,7 @@ for _, z in ipairs(ZoneData) do
     end
 end
 
-local ChampionSpinDisplay = {}
-local ChampionSpinIdMap   = {}
+local ChampionSpinDisplay, ChampionSpinIdMap = {}, {}
 for _, z in ipairs(ZoneData) do
     if ChampionsByZone[z.id] and #ChampionsByZone[z.id] > 0 then
         table.insert(ChampionSpinDisplay, z.display)
@@ -209,8 +188,13 @@ for _, z in ipairs(ZoneData) do
     end
 end
 
-print(string.format("[Anime Stars v3.1] Zones: %d | Gachas: %d | Banners: %d | Quest Lines: %d",
-    #ZoneData, #GachaData, #BannerData, #AllQuestLines))
+print(string.format("[Anime Stars v4.1] Zones: %d | Gachas: %d | Banners: %d",
+    #ZoneData, #GachaData, #BannerData))
+print("  ProfileManager: ", ProfileManager and "OK" or "MISSING")
+print("  QuestUtils:     ", QuestUtils     and "OK" or "MISSING")
+print("  QuestsDirectory:", QuestsDirectory and "OK" or "MISSING")
+print("  EnemiesManager: ", EnemiesManager and "OK" or "MISSING")
+print("  EnemiesDir:     ", EnemiesDir     and "OK" or "MISSING")
 
 -- ═══════════════════════════════════════════════════════════
 -- POPUP HIDING
@@ -243,9 +227,113 @@ local function ShowSpinPopups()
 end
 
 -- ═══════════════════════════════════════════════════════════
--- MOB MATCHING
+-- ENEMY DATA — via EnemiesManager (much more reliable)
 -- ═══════════════════════════════════════════════════════════
+
+-- Try to reach into the enemy's data via EnemiesManager, otherwise fall back to GUI
+local function GetEnemyDataForModel(mobModel)
+    if not EnemiesManager then return nil end
+    -- EnemiesManager stores enemies keyed by their unique ID (a string)
+    -- The mob model's Name usually IS this ID
+    local ok, allEnemies = pcall(function() return EnemiesManager:GetAllEnemies() end)
+    if not ok or type(allEnemies) ~= "table" then return nil end
+
+    -- Try direct lookup by model name (usually matches)
+    local direct = allEnemies[mobModel.Name]
+    if direct then return direct end
+
+    -- Try matching by model reference (some enemies expose .Model)
+    for id, enemy in pairs(allEnemies) do
+        if type(enemy) == "table" then
+            local m = enemy.Model or enemy.model or enemy._model
+            if m == mobModel then return enemy end
+        end
+    end
+    return nil
+end
+
+-- Gets enemy config (Index, DisplayName, Difficulty, etc.) from mob model
+local function GetEnemyConfig(mobModel)
+    if not mobModel then return nil end
+
+    -- Approach 1: check model attributes
+    local index = mobModel:GetAttribute("Index")
+        or mobModel:GetAttribute("EnemyIndex")
+        or mobModel:GetAttribute("ConfigId")
+
+    if index and EnemiesDir and EnemiesDir.GetConfig then
+        local ok, cfg = pcall(EnemiesDir.GetConfig, EnemiesDir, index)
+        if ok and cfg then return cfg end
+    end
+
+    -- Approach 2: via EnemiesManager
+    local enemyData = GetEnemyDataForModel(mobModel)
+    if enemyData then
+        -- Try various common field names
+        local cfg = enemyData.Config or enemyData.config or enemyData._config
+        if cfg then return cfg end
+
+        local idx = enemyData.Index or (enemyData.Data and enemyData.Data.Index)
+        if idx and EnemiesDir and EnemiesDir.GetConfig then
+            local ok, cfg2 = pcall(EnemiesDir.GetConfig, EnemiesDir, idx)
+            if ok and cfg2 then return cfg2 end
+        end
+    end
+
+    -- Approach 3: search EnemiesDir by DisplayName (from GUI or model name)
+    local displayName = mobModel:GetAttribute("DisplayName")
+    if not displayName then
+        -- Fallback to GUI reading
+        for _, gui in ipairs(LocalPlayer.PlayerGui:GetChildren()) do
+            if gui.Name == "Enemy" and gui:IsA("BillboardGui") then
+                if gui.Adornee and (gui.Adornee == mobModel or gui.Adornee:IsDescendantOf(mobModel)) then
+                    local details = gui:FindFirstChild("details")
+                    local title = details and details:FindFirstChild("title")
+                    if title and title:IsA("TextLabel") then displayName = title.Text end
+                    break
+                end
+            end
+        end
+    end
+
+    if displayName and EnemiesDir then
+        -- Search all enemy configs for matching DisplayName
+        local dir = ReplicatedStorage.Shared.Directory.Enemies:FindFirstChild("_Index")
+        if dir then
+            for _, zoneModule in ipairs(dir:GetChildren()) do
+                local ok, data = pcall(require, zoneModule)
+                if ok and type(data) == "table" then
+                    for enemyId, enemyData in pairs(data) do
+                        if type(enemyData) == "table" and enemyData.DisplayName == displayName then
+                            return enemyData
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return nil
+end
+
+-- Returns {name, difficulty, zone, isChampion} for a mob model
 local function GetMobInfo(mobModel)
+    if not mobModel then return { name=nil, difficulty=nil } end
+
+    local cfg = GetEnemyConfig(mobModel)
+    if cfg then
+        local diff = cfg.Difficulty or cfg.difficulty
+        local normDiff = diff and CONFIG_DIFF_MAP[diff] or nil
+        return {
+            name       = cfg.DisplayName or cfg.Name,
+            difficulty = normDiff or (diff and diff:lower():gsub("%s+","")) or nil,
+            configDifficulty = diff,
+            zone       = cfg.Zone or cfg.zone,
+            isBoss     = cfg.IsBoss or cfg.Boss or (normDiff == "boss"),
+        }
+    end
+
+    -- Ultimate fallback: GUI parsing (old behavior)
     for _, gui in ipairs(LocalPlayer.PlayerGui:GetChildren()) do
         if gui.Name == "Enemy" and gui:IsA("BillboardGui") then
             if gui.Adornee and (gui.Adornee == mobModel or gui.Adornee:IsDescendantOf(mobModel)) then
@@ -253,15 +341,18 @@ local function GetMobInfo(mobModel)
                 if details then
                     local title = details:FindFirstChild("title")
                     local diff  = details:FindFirstChild("difficulty")
+                    local diffText = diff and diff:IsA("TextLabel") and diff.Text or nil
                     return {
                         name       = title and title:IsA("TextLabel") and title.Text or nil,
-                        difficulty = diff  and diff:IsA("TextLabel")  and diff.Text  or nil,
+                        difficulty = diffText and diffText:lower():gsub("%s+","") or nil,
+                        configDifficulty = diffText,
                     }
                 end
             end
         end
     end
-    return { name = nil, difficulty = nil }
+
+    return { name=nil, difficulty=nil }
 end
 
 local function NormDiff(str)
@@ -270,6 +361,7 @@ local function NormDiff(str)
 end
 
 local function IsChampion(mobName)
+    if not mobName then return false end
     for _, champList in pairs(ChampionsByZone) do
         for _, c in ipairs(champList) do
             if c == mobName then return true end
@@ -284,41 +376,35 @@ local function NameMatches(actualName, wantedName)
     local w = wantedName:lower():gsub("%s+","")
     if a == w then return true end
     if a:find(w,1,true) or w:find(a,1,true) then return true end
-    if math.abs(#a-#w) <= 1 and #a >= 3 then
-        local minLen = math.min(#a,#w)
-        local matches = 0
-        for i = 1, minLen do
-            if a:sub(i,i) == w:sub(i,i) then matches = matches + 1 end
-        end
-        if matches >= minLen - 1 then return true end
-    end
     return false
 end
 
--- filter = { difficulty = "easy"|"hard"|"ultrahard"|"boss", zoneId = "alienplanet", mobName = "..." }
+-- filter: { mobNames = {["name"]=true}, difficulty = "ultrahard", zoneId = "..." }
 local function MatchesFilter(mobModel, filter)
     if not filter then return true end
     local info = GetMobInfo(mobModel)
 
-    -- mob name filter (priority farm)
     if filter.mobNames and next(filter.mobNames) then
         if not info.name then return false end
-        local matched = false
+        local nameMatched = false
         for name, enabled in pairs(filter.mobNames) do
-            if enabled and NameMatches(info.name, name) then matched = true; break end
+            if enabled and NameMatches(info.name, name) then
+                nameMatched = true
+                break
+            end
         end
-        if not matched then return false end
+        if not nameMatched then return false end
     elseif filter.mobName then
         if not info.name then return false end
         if not NameMatches(info.name, filter.mobName) then return false end
     end
 
-    -- difficulty filter (comes from quest Objective.Target)
     if filter.difficulty then
-        local wanted = NormDiff(filter.difficulty)
-        local actual = NormDiff(info.difficulty)
+        local wanted = filter.difficulty
+        local actual = info.difficulty
         if wanted == "boss" then
             if actual == "boss" then return true end
+            if info.isBoss then return true end
             if info.name and IsChampion(info.name) then return true end
             return false
         end
@@ -329,23 +415,60 @@ local function MatchesFilter(mobModel, filter)
     return true
 end
 
+-- Enumerate live enemies via EnemiesManager (or fall back to Workspace scan)
+local function IterateLiveEnemies()
+    local results = {}
+
+    if EnemiesManager then
+        local ok, allEnemies = pcall(function() return EnemiesManager:GetAllEnemies() end)
+        if ok and type(allEnemies) == "table" then
+            for id, enemy in pairs(allEnemies) do
+                if type(enemy) == "table" then
+                    local model = enemy.Model or enemy.model or enemy._model
+                    if not model then
+                        -- Try finding by name
+                        local enemies = Workspace:FindFirstChild("Enemies")
+                        if enemies then model = enemies:FindFirstChild(id) end
+                    end
+                    if model and model.Parent then
+                        local hum = model:FindFirstChildOfClass("Humanoid")
+                        local hrp = model:FindFirstChild("HumanoidRootPart")
+                        if hum and hum.Health > 0 and hrp then
+                            table.insert(results, { model=model, hrp=hrp, hum=hum, enemyData=enemy, id=id })
+                        end
+                    end
+                end
+            end
+            if #results > 0 then return results end
+        end
+    end
+
+    -- Fallback: Workspace.Enemies scan
+    local enemies = Workspace:FindFirstChild("Enemies")
+    if enemies then
+        for _, mob in ipairs(enemies:GetChildren()) do
+            local hum = mob:FindFirstChildOfClass("Humanoid")
+            local hrp = mob:FindFirstChild("HumanoidRootPart")
+            if hum and hum.Health > 0 and hrp then
+                table.insert(results, { model=mob, hrp=hrp, hum=hum })
+            end
+        end
+    end
+    return results
+end
+
 local function GetAllMatchingMobs(filter, ignoreRange)
     local char = LocalPlayer.Character
     if not char then return {} end
     local hrp = char:FindFirstChild("HumanoidRootPart")
     if not hrp then return {} end
-    local enemies = Workspace:FindFirstChild("Enemies")
-    if not enemies then return {} end
+
     local maxDist = ignoreRange and math.huge or 2000
     local mobs = {}
-    for _, mob in ipairs(enemies:GetChildren()) do
-        local mobHrp = mob:FindFirstChild("HumanoidRootPart")
-        local hum    = mob:FindFirstChildOfClass("Humanoid")
-        if mobHrp and hum and hum.Health > 0 then
-            local dist = (hrp.Position - mobHrp.Position).Magnitude
-            if dist < maxDist and MatchesFilter(mob, filter) then
-                table.insert(mobs, { mob=mob, hrp=mobHrp, dist=dist })
-            end
+    for _, e in ipairs(IterateLiveEnemies()) do
+        local dist = (hrp.Position - e.hrp.Position).Magnitude
+        if dist < maxDist and MatchesFilter(e.model, filter) then
+            table.insert(mobs, { mob=e.model, hrp=e.hrp, dist=dist })
         end
     end
     table.sort(mobs, function(a,b) return a.dist < b.dist end)
@@ -382,243 +505,187 @@ end
 -- REMOTES
 -- ═══════════════════════════════════════════════════════════
 local Actions = {}
-function Actions.M1(hero, combo)
-    Remote:FireServer({{Path="combat/m1", Params={hero, combo}}})
+function Actions.M1(hero, combo)       Remote:FireServer({{Path="combat/m1", Params={hero, combo}}}) end
+function Actions.CastSkill()           Remote:FireServer({{Path="abilities/cast", Params={"Skill"}}}) end
+function Actions.CastUltimate()        Remote:FireServer({{Path="abilities/cast", Params={"Ultimate"}}}) end
+function Actions.Teleport(zoneId)      Remote:FireServer({{Path="zones/teleport", Params={zoneId}}}) end
+function Actions.ChampionSpin(zoneId)  Remote:FireServer({{Path="champions/spin", Params={"auto", zoneId}}}) end
+function Actions.GachaSpin(name)       Remote:FireServer({{Path="gacha/spin", Params={name, "auto"}}}) end
+function Actions.GachaStop(name)       Remote:FireServer({{Path="gacha/stopAuto", Params={name}}}) end
+function Actions.RankupPower()         Remote:FireServer({{Path="rankup/power", Params={}}}) end
+function Actions.BannerRoll(b,c,t)     Remote:FireServer({{Path="banner/requestRoll", Params={b,c,t or "Normal"}}}) end
+function Actions.ClaimMission(line, index)
+    Remote:FireServer({{Path="missions/claim", Params={line, index}}})
 end
-function Actions.CastSkill()
-    Remote:FireServer({{Path="abilities/cast", Params={"Skill"}}})
+function Actions.PinMission(missionId)
+    Remote:FireServer({{Path="missions/pin", Params={missionId}}})
 end
-function Actions.CastUltimate()
-    Remote:FireServer({{Path="abilities/cast", Params={"Ultimate"}}})
-end
-function Actions.Teleport(zoneId)
-    Remote:FireServer({{Path="zones/teleport", Params={zoneId}}})
-end
-function Actions.ChampionSpin(zoneId)
-    Remote:FireServer({{Path="champions/spin", Params={"auto", zoneId}}})
-end
-function Actions.GachaSpin(gachaName)
-    Remote:FireServer({{Path="gacha/spin", Params={gachaName, "auto"}}})
-end
-function Actions.GachaStop(gachaName)
-    Remote:FireServer({{Path="gacha/stopAuto", Params={gachaName}}})
-end
-function Actions.RankupPower()
-    Remote:FireServer({{Path="rankup/power", Params={}}})
-end
-function Actions.BannerRoll(bannerName, count, rollType)
-    Remote:FireServer({{Path="banner/requestRoll", Params={bannerName, count, rollType or "Normal"}}})
-end
-function Actions.HiddenSpin(gachaName)
-    HideSpinPopups(); Actions.GachaSpin(gachaName); task.wait(0.1); HideSpinPopups()
-end
-function Actions.HiddenChampionSpin(zoneId)
-    HideSpinPopups(); Actions.ChampionSpin(zoneId); task.wait(0.1); HideSpinPopups()
-end
-function Actions.HiddenBannerRoll(banner, count, rollType)
-    HideSpinPopups(); Actions.BannerRoll(banner, count, rollType); task.wait(0.1); HideSpinPopups()
-end
+function Actions.HiddenSpin(name)        HideSpinPopups(); Actions.GachaSpin(name);    task.wait(0.1); HideSpinPopups() end
+function Actions.HiddenChampionSpin(z)   HideSpinPopups(); Actions.ChampionSpin(z);    task.wait(0.1); HideSpinPopups() end
+function Actions.HiddenBannerRoll(b,c,t) HideSpinPopups(); Actions.BannerRoll(b,c,t);  task.wait(0.1); HideSpinPopups() end
 
 local function GetCurrentHero()
     local char = LocalPlayer.Character
     if char then
-        local heroAttr = char:GetAttribute("AnimationPack")
-        if heroAttr and heroAttr ~= "" then return heroAttr end
+        local h = char:GetAttribute("AnimationPack")
+        if h and h ~= "" then return h end
     end
     return "Hawk"
 end
 
 -- ═══════════════════════════════════════════════════════════
--- QUEST ENGINE  (reads player data, not GUI text)
+-- QUEST ENGINE
 -- ═══════════════════════════════════════════════════════════
-
--- Returns the player's quest progress table from their leaderstats/data
--- The game stores completed quest keys in the player's data folder
-local function GetPlayerQuestData()
-    -- Try to read from the player's data attributes or folder
-    local data = {}
-    pcall(function()
-        local playerData = LocalPlayer:FindFirstChild("Data")
-            or LocalPlayer:FindFirstChild("PlayerData")
-            or LocalPlayer:FindFirstChild("SaveData")
-        if playerData then
-            for _, attr in ipairs(playerData:GetChildren()) do
-                if attr:IsA("StringValue") or attr:IsA("BoolValue") or attr:IsA("IntValue") or attr:IsA("NumberValue") then
-                    data[attr.Name] = attr.Value
-                end
-            end
-            -- Also read attributes
-            for k, v in pairs(playerData:GetAttributes()) do
-                data[k] = v
-            end
-        end
-        -- Also try direct player attributes
-        for k, v in pairs(LocalPlayer:GetAttributes()) do
-            data[k] = v
-        end
-    end)
-    return data
+local function ParseMissionId(missionId)
+    if not missionId then return nil, nil end
+    local line, idx = missionId:match("^(.-)_(%d+)$")
+    return line, tonumber(idx)
 end
 
--- Checks if a quest line's requirements are met (all required keys completed)
-local function AreRequirementsMet(questLine, playerData)
-    for _, req in ipairs(questLine.requirements) do
-        -- A requirement key like "MissionsAlienPlanet_1" means that quest must be done
-        -- The game typically marks completion as playerData[key] = true or a number
-        local val = playerData[req]
-        if not val or val == false or val == 0 then
-            return false
-        end
+local function GetStageConfig(missionId)
+    if not QuestsDirectory or not missionId then return nil, nil end
+    if QuestUtils and QuestUtils.getStage then
+        local ok, stage, line, lineName, idx = pcall(QuestUtils.getStage, missionId)
+        if ok and stage then return stage, line, lineName, idx end
     end
-    return true
+    local lineName, idx = ParseMissionId(missionId)
+    if not lineName then return nil, nil end
+    local lineConfig = (QuestsDirectory.Get and QuestsDirectory.Get(lineName))
+        or (QuestsDirectory.Directory and QuestsDirectory.Directory[lineName])
+    if not lineConfig or not lineConfig.Quests then return nil, nil end
+    return lineConfig.Quests[idx], lineConfig, lineName, idx
 end
 
--- Checks if a quest line is already completed
-local function IsQuestCompleted(questLine, playerData)
-    local val = playerData[questLine.key]
-    return val == true or (type(val) == "number" and val > 0)
-end
-
--- Finds the current active quest for the player from module data
--- Returns the quest line table or nil
-local function GetActiveModuleQuest()
-    local playerData = GetPlayerQuestData()
-
-    -- First pass: find an in-progress quest (requirements met, not completed)
-    for _, questLine in ipairs(AllQuestLines) do
-        if questLine.objective and questLine.objective.Type == "Slayer" then
-            local completed = IsQuestCompleted(questLine, playerData)
-            local reqsMet   = AreRequirementsMet(questLine, playerData)
-            if reqsMet and not completed then
-                return questLine
-            end
-        end
-    end
+local function GetMissionsData()
+    if not ProfileManager then return nil end
+    local ok, data = pcall(function() return ProfileManager:get("Missions", false) end)
+    if ok and type(data) == "table" then return data end
     return nil
 end
 
--- Reads the active quest from the GUI (progress bar, name, etc.)
--- This gives us the live progress number since that's only in the GUI
-local function GetActiveQuestFromGUI()
-    local pg = LocalPlayer:FindFirstChild("PlayerGui"); if not pg then return nil end
-    local main = pg:FindFirstChild("Main");            if not main then return nil end
-    local hud  = main:FindFirstChild("Hud");           if not hud  then return nil end
-    local quest = hud:FindFirstChild("Quest");         if not quest then return nil end
-    local info     = quest:FindFirstChild("Info")
-    local progress = quest:FindFirstChild("Progress")
-    local claim    = quest:FindFirstChild("Claim")
-    local titleLabel    = info     and info:FindFirstChild("Title")
-    local progressLabel = progress and progress:FindFirstChild("Label")
-    local claimBtn      = claim    and claim:FindFirstChild("Button")
-    local title    = titleLabel    and titleLabel:IsA("TextLabel")    and titleLabel.Text    or ""
-    local prog     = progressLabel and progressLabel:IsA("TextLabel") and progressLabel.Text or ""
-    local canClaim = claim and claim.Visible or false
-    if title == "" then return nil end
-    return { title=title, progress=prog, canClaim=canClaim, claimButton=claimBtn }
-end
+local function BuildQuestInfo(missionId, ongoingData)
+    if not missionId or not ongoingData then return nil end
+    local stage, lineConfig, lineName, idx = GetStageConfig(missionId)
+    if not stage then return nil end
 
--- Matches GUI quest title to a module quest line
-local function MatchGUIQuestToModule(guiTitle)
-    if not guiTitle or guiTitle == "" then return nil end
-    local lower = guiTitle:lower()
-    for _, questLine in ipairs(AllQuestLines) do
-        if questLine.name and questLine.name:lower() == lower then
-            return questLine
-        end
-    end
-    -- Fuzzy: check if title contains quest name
-    for _, questLine in ipairs(AllQuestLines) do
-        if questLine.name and lower:find(questLine.name:lower(), 1, true) then
-            return questLine
-        end
-    end
-    return nil
-end
-
--- Build the active quest filter from module data (exact, no parsing needed)
-local function BuildQuestFilter(questLine)
-    if not questLine or not questLine.objective then return nil end
-    local obj = questLine.objective
-    if obj.Type ~= "Slayer" then return nil end
-
-    -- Map the module's Target string to our internal difficulty tag
-    local diff = DIFFICULTY_MAP[obj.Target]
-
+    local objective = stage.Objective or {}
     return {
-        difficulty = diff,                  -- e.g. "ultrahard"
-        zoneId     = obj.TargetZone,        -- e.g. "alienplanet"
-        -- No mobName filter for Slayer quests — just difficulty in zone
+        missionId   = missionId,
+        lineName    = lineName,
+        index       = idx,
+        name        = stage.Name,
+        description = stage.Description,
+        objective   = objective,
+        progress    = ongoingData.Progress or 0,
+        goal        = ongoingData.Goal or objective.Goal or 1,
+        completed   = ongoingData.Completed == true,
+        zoneId      = (lineConfig and lineConfig.ZoneRestriction) or objective.TargetZone,
+        difficulty  = objective.Target and DIFFICULTY_MAP[objective.Target] or nil,
+        stage       = stage,
+        lineConfig  = lineConfig,
     }
 end
 
-local function ClickClaimButton()
-    local q = GetActiveQuestFromGUI()
-    if q and q.canClaim and q.claimButton then
-        local btn = q.claimButton
-        pcall(function()
-            if firesignal then
-                firesignal(btn.MouseButton1Click)
-                firesignal(btn.Activated)
-            end
-        end)
-        pcall(function()
-            local pos = btn.AbsolutePosition + btn.AbsoluteSize / 2
-            VirtualUser:Button1Down(pos)
-            task.wait(0.05)
-            VirtualUser:Button1Up(pos)
-        end)
-        return true
+local function GetActiveQuest()
+    local missions = GetMissionsData()
+    if not missions then return nil end
+
+    local pinnedId = missions.Pinned and next(missions.Pinned) or nil
+    if pinnedId and missions.OnGoing and missions.OnGoing[pinnedId] then
+        return BuildQuestInfo(pinnedId, missions.OnGoing[pinnedId])
     end
-    return false
+
+    if QuestUtils and QuestUtils.mostRelevant then
+        local ok, relevantId = pcall(QuestUtils.mostRelevant, missions, nil)
+        if ok and relevantId and missions.OnGoing[relevantId] then
+            return BuildQuestInfo(relevantId, missions.OnGoing[relevantId])
+        end
+    end
+
+    if missions.OnGoing then
+        for id, data in pairs(missions.OnGoing) do
+            if not data.Completed and not (missions.Finished and missions.Finished[id]) then
+                return BuildQuestInfo(id, data)
+            end
+        end
+        for id, data in pairs(missions.OnGoing) do
+            if data.Completed then return BuildQuestInfo(id, data) end
+        end
+    end
+    return nil
+end
+
+local function BuildFilterFromQuest(quest)
+    if not quest then return nil end
+    if not quest.difficulty and not quest.zoneId then return nil end
+    return { difficulty=quest.difficulty, zoneId=quest.zoneId }
+end
+
+local function ClaimQuest(quest)
+    if not quest then return false end
+    Actions.ClaimMission(quest.lineName, quest.index)
+    return true
+end
+
+local function GetPlayerCurrentZone()
+    -- Try ZonesManager first
+    if ZonesManager and ZonesManager.GetCurrentZone then
+        local ok, z = pcall(function() return ZonesManager:GetCurrentZone() end)
+        if ok and z then return z end
+    end
+    local char = LocalPlayer.Character
+    if char then
+        local z = char:GetAttribute("Zone") or char:GetAttribute("CurrentZone")
+        if z then return z end
+    end
+    return LocalPlayer:GetAttribute("Zone") or LocalPlayer:GetAttribute("CurrentZone")
 end
 
 -- ═══════════════════════════════════════════════════════════
 -- STATE
 -- ═══════════════════════════════════════════════════════════
 local State = {
-    AutoAttack    = false,
-    AutoQuest     = false,
-    AutoSkill     = false,
-    AutoUltimate  = false,
-    AutoRankup    = false,
-    AutoChampSpin = false,
-    AutoBanner    = false,
-    SmartGroup    = true,
-    UseAnchor     = false,
-    PriorityMob   = false,
-    FallbackAny   = true,
-    AutoTeleport  = true,
-    AutoClaim     = true,
+    AutoAttack     = false,
+    AutoQuest      = false,
+    AutoSkill      = false,
+    AutoUltimate   = false,
+    AutoRankup     = false,
+    AutoChampSpin  = false,
+    AutoBanner     = false,
+    SmartGroup     = true,
+    UseAnchor      = false,
+    PriorityMob    = false,
+    FallbackAny    = false,
+    AutoTeleport   = true,
+    AutoClaim      = true,
 
-    SkillDelay    = 5,
-    UltDelay      = 15,
-    RankupDelay   = 2,
-    GroupRadius   = 25,
-    BannerDelay   = 5,
+    SkillDelay     = 5,
+    UltDelay       = 15,
+    RankupDelay    = 2,
+    GroupRadius    = 25,
+    BannerDelay    = 5,
 
-    SelectedZone  = FarmZoneList[1] or "",
-    SelectedMob   = {},
-    ChampZone     = ChampionSpinDisplay[1] or "",
-    BannerName    = BannerData[1] or "",
-    BannerCount   = 10,
-    BannerRollType= "Normal",
+    SelectedZone   = FarmZoneList[1] or "",
+    SelectedMob    = {},
+    ChampZone      = ChampionSpinDisplay[1] or "",
+    BannerName     = BannerData[1] or "",
+    BannerCount    = 10,
+    BannerRollType = "Normal",
 
-    GachaEnabled  = {},
+    GachaEnabled   = {},
 }
 for _, g in ipairs(GachaData) do State.GachaEnabled[g.id] = false end
 
--- Live quest state (set by quest loop)
-local ActiveQuestLine   = nil   -- module quest table
-local ActiveQuestFilter = nil   -- built from objective
+local ActiveQuest       = nil
+local ActiveQuestFilter = nil
 local lastZoneTeleport  = 0
 
--- Target tracking
-local currentTarget          = nil
-local currentGroup           = nil
-local currentGroupSize       = 0
-local comboIndex             = 1
-local needNewTarget          = true
-local currentTargetDiedConn  = nil
+local currentTarget         = nil
+local currentGroup          = nil
+local currentGroupSize      = 0
+local comboIndex            = 1
+local needNewTarget         = true
+local currentTargetDiedConn = nil
 
 local function invalidateTarget()
     needNewTarget = true
@@ -639,11 +706,11 @@ local function setCurrentTarget(mob)
 end
 
 -- ═══════════════════════════════════════════════════════════
--- WINDOW + UI
+-- WINDOW
 -- ═══════════════════════════════════════════════════════════
 local Window = MacLib:Window({
     Title    = "Anime Stars",
-    Subtitle = "v3.1",
+    Subtitle = "v4.1",
     Size     = UDim2.fromOffset(868, 650),
     DragStyle = 1,
     DisabledWindowControls = {},
@@ -652,18 +719,9 @@ local Window = MacLib:Window({
     AcrylicBlur   = true,
 })
 
-Window:GlobalSetting({
-    Name = "UI Blur", Default = Window:GetAcrylicBlurState(),
-    Callback = function(v) Window:SetAcrylicBlurState(v) end,
-})
-Window:GlobalSetting({
-    Name = "Notifications", Default = Window:GetNotificationsState(),
-    Callback = function(v) Window:SetNotificationsState(v) end,
-})
-Window:GlobalSetting({
-    Name = "Show User Info", Default = Window:GetUserInfoState(),
-    Callback = function(v) Window:SetUserInfoState(v) end,
-})
+Window:GlobalSetting({ Name="UI Blur",        Default=Window:GetAcrylicBlurState(),   Callback=function(v) Window:SetAcrylicBlurState(v)   end })
+Window:GlobalSetting({ Name="Notifications",  Default=Window:GetNotificationsState(), Callback=function(v) Window:SetNotificationsState(v) end })
+Window:GlobalSetting({ Name="Show User Info", Default=Window:GetUserInfoState(),      Callback=function(v) Window:SetUserInfoState(v)      end })
 
 local TabGroup = Window:TabGroup()
 local Tabs = {
@@ -684,69 +742,89 @@ MainLeft:Header({ Name = "Status" })
 local HeroLabel   = MainLeft:Label({ Text = "Hero: " .. GetCurrentHero() })
 local GroupLabel  = MainLeft:Label({ Text = "Group Farm: -" })
 local TargetLabel = MainLeft:Label({ Text = "Target: -" })
-MainLeft:Label({ Text = string.format("Zones: %d | Gachas: %d | Banners: %d | Quests: %d",
-    #ZoneData, #GachaData, #BannerData, #AllQuestLines) })
+local FilterLabel = MainLeft:Label({ Text = "Filter: -" })
+local ZoneLabel   = MainLeft:Label({ Text = "Current Zone: -" })
 
 MainRight:Header({ Name = "Server" })
-MainRight:Button({
-    Name = "Rejoin Server",
-    Callback = function()
-        game:GetService("TeleportService"):Teleport(game.PlaceId, LocalPlayer)
-    end,
-})
-MainRight:Button({
-    Name = "Restore Popups",
-    Callback = function()
-        ShowSpinPopups()
-        Window:Notify({ Title="Popups", Description="Restored", Lifetime=3 })
-    end,
-})
+MainRight:Button({ Name="Rejoin Server", Callback=function()
+    game:GetService("TeleportService"):Teleport(game.PlaceId, LocalPlayer)
+end })
+MainRight:Button({ Name="Restore Popups", Callback=function()
+    ShowSpinPopups()
+    Window:Notify({ Title="Popups", Description="Restored", Lifetime=3 })
+end })
 
 -- ── FARM TAB ────────────────────────────────────────────────
 local FarmLeft  = Tabs.Farm:Section({ Side="Left"  })
 local FarmRight = Tabs.Farm:Section({ Side="Right" })
 
 FarmLeft:Header({ Name = "Auto Farm" })
-FarmLeft:Toggle({ Name="Auto Attack",      Default=false, Callback=function(v) State.AutoAttack   = v end }, "AutoAttack")
-FarmLeft:Toggle({ Name="Smart Group Farm", Default=true,  Callback=function(v) State.SmartGroup   = v; invalidateTarget() end }, "SmartGroup")
-FarmLeft:Slider({ Name="Group Radius", Default=25, Minimum=10, Maximum=60, Precision=0,
-    Callback=function(v) State.GroupRadius = v end }, "GroupRadius")
+FarmLeft:Toggle({ Name="Auto Attack",      Default=false, Callback=function(v) State.AutoAttack = v end }, "AutoAttack")
+FarmLeft:Toggle({ Name="Smart Group Farm", Default=true,  Callback=function(v) State.SmartGroup = v; invalidateTarget() end }, "SmartGroup")
+FarmLeft:Slider({ Name="Group Radius", Default=25, Minimum=10, Maximum=60, Precision=0, Callback=function(v) State.GroupRadius = v end }, "GroupRadius")
 FarmLeft:Toggle({ Name="Anchor Mode", Default=false, Callback=function(v) State.UseAnchor = v end }, "UseAnchor")
 
 FarmLeft:Divider()
 FarmLeft:Header({ Name = "Abilities" })
-FarmLeft:Toggle({ Name="Auto Skill",    Default=false, Callback=function(v) State.AutoSkill   = v end }, "AutoSkill")
-FarmLeft:Slider({ Name="Skill Delay",   Default=5,  Minimum=1,  Maximum=30, Precision=1, Callback=function(v) State.SkillDelay = v end }, "SkillDelay")
-FarmLeft:Toggle({ Name="Auto Ultimate", Default=false, Callback=function(v) State.AutoUltimate = v end }, "AutoUltimate")
-FarmLeft:Slider({ Name="Ultimate Delay",Default=15, Minimum=5,  Maximum=60, Precision=1, Callback=function(v) State.UltDelay   = v end }, "UltDelay")
+FarmLeft:Toggle({ Name="Auto Skill",     Default=false, Callback=function(v) State.AutoSkill = v end }, "AutoSkill")
+FarmLeft:Slider({ Name="Skill Delay",    Default=5,  Minimum=1, Maximum=30, Precision=1, Callback=function(v) State.SkillDelay = v end }, "SkillDelay")
+FarmLeft:Toggle({ Name="Auto Ultimate",  Default=false, Callback=function(v) State.AutoUltimate = v end }, "AutoUltimate")
+FarmLeft:Slider({ Name="Ultimate Delay", Default=15, Minimum=5, Maximum=60, Precision=1, Callback=function(v) State.UltDelay = v end }, "UltDelay")
 
 FarmRight:Header({ Name = "Target Filter" })
-FarmRight:Toggle({ Name="Prioritize Selected Mobs",     Default=false, Callback=function(v) State.PriorityMob = v; invalidateTarget() end }, "PriorityMob")
-FarmRight:Toggle({ Name="Fallback: Any Mob if None",    Default=true,  Callback=function(v) State.FallbackAny = v; invalidateTarget() end }, "FallbackAny")
+FarmRight:Toggle({ Name="Prioritize Selected Mobs",  Default=false, Callback=function(v) State.PriorityMob = v; invalidateTarget() end }, "PriorityMob")
+FarmRight:Toggle({ Name="Fallback: Any Mob if None", Default=false, Callback=function(v) State.FallbackAny = v; invalidateTarget() end }, "FallbackAny")
 
 local defaultFarmZone = FarmZoneList[1] or ""
 local defaultZoneId   = ZoneNameToId[defaultFarmZone]
 local defaultMobList  = AllByZone[defaultZoneId] or {}
 local MobDropdown
 
+-- Forward-declare mob dropdown so zone callback can refresh it
+local MobDropdown
+
 FarmRight:Dropdown({
-    Name="Zone", Multi=false, Required=true,
-    Options = FarmZoneList, Default = 1,
+    Name = "Zone",
+    Multi = false,
+    Required = true,
+    Options = FarmZoneList,
+    Default = 1,
     Callback = function(v)
         State.SelectedZone = v
-        State.SelectedMob  = {}
+        State.SelectedMob = {}
         invalidateTarget()
-        local zId   = ZoneNameToId[v]
+        
+        local zId = ZoneNameToId[v]
         local mList = AllByZone[zId] or {}
-        if MobDropdown then MobDropdown:Refresh(#mList > 0 and mList or {"(none)"}, true) end
+        if #mList == 0 then mList = {"(no mobs)"} end
+        
+        if MobDropdown then
+            -- Try multiple MacLib refresh methods (varies by version)
+            local ok = pcall(function() MobDropdown:SetOptions(mList) end)
+            if not ok then
+                pcall(function() MobDropdown:Refresh(mList, true) end)
+            end
+            if not ok then
+                pcall(function() MobDropdown:UpdateOptions(mList) end)
+            end
+            -- Clear the current selection
+            pcall(function() MobDropdown:UpdateSelection(mList[1]) end)
+        end
     end,
 }, "SelectedZone")
 
 MobDropdown = FarmRight:Dropdown({
-    Name="Priority Mob", Multi=false, Required=false,
-    Options = #defaultMobList > 0 and defaultMobList or {"(none)"}, Default=1,
+    Name = "Priority Mob",
+    Multi = false,
+    Required = false,
+    Options = #defaultMobList > 0 and defaultMobList or {"(none)"},
+    Default = 1,
     Callback = function(v)
-        State.SelectedMob = { [v] = true }
+        if v and v ~= "(no mobs)" and v ~= "(none)" then
+            State.SelectedMob = { [v] = true }
+        else
+            State.SelectedMob = {}
+        end
         invalidateTarget()
     end,
 }, "SelectedMob")
@@ -756,72 +834,82 @@ local QuestLeft  = Tabs.Quest:Section({ Side="Left"  })
 local QuestRight = Tabs.Quest:Section({ Side="Right" })
 
 QuestLeft:Header({ Name = "Auto Quest" })
-QuestLeft:Toggle({ Name="Auto Quest",           Default=false, Callback=function(v) State.AutoQuest   = v end }, "AutoQuest")
-QuestLeft:Toggle({ Name="Auto Teleport to Zone",Default=true,  Callback=function(v) State.AutoTeleport = v end }, "AutoTeleport")
-QuestLeft:Toggle({ Name="Auto Claim",           Default=true,  Callback=function(v) State.AutoClaim   = v end }, "AutoClaim")
+QuestLeft:Toggle({ Name="Auto Quest",            Default=false, Callback=function(v) State.AutoQuest    = v end }, "AutoQuest")
+QuestLeft:Toggle({ Name="Auto Teleport to Zone", Default=true,  Callback=function(v) State.AutoTeleport = v end }, "AutoTeleport")
+QuestLeft:Toggle({ Name="Auto Claim",            Default=true,  Callback=function(v) State.AutoClaim    = v end }, "AutoClaim")
+
 QuestLeft:Button({
-    Name = "Manual Claim",
+    Name = "Manual Claim Active",
     Callback = function()
-        local ok = ClickClaimButton()
-        Window:Notify({ Title="Claim", Description=ok and "Claimed!" or "Nothing to claim", Lifetime=3 })
+        if ActiveQuest and ActiveQuest.completed then
+            ClaimQuest(ActiveQuest)
+            Window:Notify({ Title="Claim", Description="Claimed "..ActiveQuest.name, Lifetime=2 })
+        else
+            Window:Notify({ Title="Claim", Description="No completed quest", Lifetime=2 })
+        end
     end,
 })
 
 QuestLeft:Divider()
 QuestLeft:Header({ Name = "Active Quest" })
+local QLabelName     = QuestLeft:Label({ Text = "Name: -" })
+local QLabelId       = QuestLeft:Label({ Text = "ID: -" })
+local QLabelZone     = QuestLeft:Label({ Text = "Zone: -" })
+local QLabelDiff     = QuestLeft:Label({ Text = "Difficulty: -" })
+local QLabelProgress = QuestLeft:Label({ Text = "Progress: -" })
+local QLabelStatus   = QuestLeft:Label({ Text = "Status: -" })
 
--- These labels show the data read from the MODULE (not GUI text parsing)
-local QLabelName     = QuestLeft:Label({ Text = "Name: -"        })
-local QLabelZone     = QuestLeft:Label({ Text = "Zone: -"        })
-local QLabelDiff     = QuestLeft:Label({ Text = "Difficulty: -"  })
-local QLabelGoal     = QuestLeft:Label({ Text = "Goal: -"        })
-local QLabelProgress = QuestLeft:Label({ Text = "Progress: -"    })
-local QLabelClaim    = QuestLeft:Label({ Text = "Claim Ready: No"})
+QuestLeft:Divider()
+QuestLeft:Header({ Name = "Debug" })
 
 QuestLeft:Button({
-    Name = "Refresh Quest Info",
+    Name = "Debug Missions (Console)",
     Callback = function()
-        local gui = GetActiveQuestFromGUI()
-        if gui then
-            local matched = MatchGUIQuestToModule(gui.title)
-            if matched then
-                local obj = matched.objective or {}
-                QLabelName:SetText("Name: " .. matched.name)
-                QLabelZone:SetText("Zone: " .. (ZoneDisplayNames[obj.TargetZone] or obj.TargetZone or "?"))
-                QLabelDiff:SetText("Difficulty: " .. (obj.Target or "?"))
-                QLabelGoal:SetText("Goal: " .. tostring(obj.Goal or "?"))
-            else
-                QLabelName:SetText("Name: " .. gui.title)
-                QLabelZone:SetText("Zone: (unknown)")
-                QLabelDiff:SetText("Difficulty: (unknown)")
-                QLabelGoal:SetText("Goal: (unknown)")
-            end
-            QLabelProgress:SetText("Progress: " .. gui.progress)
-            QLabelClaim:SetText("Claim Ready: " .. (gui.canClaim and "YES ✓" or "No"))
+        print("\n=== MISSIONS DATA ===")
+        local missions = GetMissionsData()
+        if not missions then print("No missions data"); return end
+        print("[Pinned]")
+        for k, v in pairs(missions.Pinned or {}) do print("  "..tostring(k).." = "..tostring(v)) end
+        print("[OnGoing]")
+        for k, v in pairs(missions.OnGoing or {}) do
+            print(string.format("  %s → %s/%s Completed=%s",
+                k, tostring(v.Progress or 0), tostring(v.Goal),
+                tostring(v.Completed)))
+        end
+        print("\n[Active Selection]")
+        local q = GetActiveQuest()
+        if q then
+            print("  ID:", q.missionId, "| Name:", q.name)
+            print("  Zone:", q.zoneId, "| Diff:", q.difficulty)
+            print("  Progress:", q.progress .. "/" .. q.goal, "| Complete:", q.completed)
         else
-            QLabelName:SetText("Name: (none)")
+            print("  (none)")
         end
     end,
 })
 
--- Quest line browser (right side)
-QuestRight:Header({ Name = "Quest Lines (" .. #AllQuestLines .. ")" })
+QuestLeft:Button({
+    Name = "Debug Enemies (Console)",
+    Callback = function()
+        print("\n=== ENEMIES SCAN ===")
+        print("EnemiesManager:", EnemiesManager and "OK" or "MISSING")
+        local enemies = IterateLiveEnemies()
+        print("Total live:", #enemies)
+        local char = LocalPlayer.Character
+        local myHrp = char and char:FindFirstChild("HumanoidRootPart")
+        for i, e in ipairs(enemies) do
+            if i > 25 then print("  ...(more)"); break end
+            local info = GetMobInfo(e.model)
+            local dist = myHrp and math.floor((myHrp.Position - e.hrp.Position).Magnitude) or "?"
+            print(string.format("  [%d] %s | diff=%s | %sm",
+                i, tostring(info.name), tostring(info.difficulty), tostring(dist)))
+        end
+    end,
+})
 
--- Show zone groups
-local seenZones = {}
-for _, ql in ipairs(AllQuestLines) do
-    if ql.zone and not seenZones[ql.zone] then
-        seenZones[ql.zone] = true
-        local zoneDisplay = ZoneDisplayNames[ql.zone] or ql.zone
-        QuestRight:SubLabel({ Text = "▸ " .. zoneDisplay })
-    end
-    local obj = ql.objective or {}
-    QuestRight:Label({ Text = string.format("  %s [%s x%d]",
-        ql.name or "?",
-        obj.Target or "?",
-        obj.Goal or 0)
-    })
-end
+-- Right side: quest browser
+QuestRight:Header({ Name = "All OnGoing Missions" })
+local OnGoingSummaryLabel = QuestRight:Label({ Text = "Loading..." })
 
 -- ── EXTRAS TAB ──────────────────────────────────────────────
 local ExtrasLeft  = Tabs.Extras:Section({ Side="Left"  })
@@ -836,8 +924,7 @@ ExtrasLeft:Toggle({
             local zoneId = ChampionSpinIdMap[State.ChampZone]
             if zoneId then Actions.HiddenChampionSpin(zoneId) end
         else
-            Actions.GachaStop("Champions")
-            task.wait(0.5)
+            Actions.GachaStop("Champions"); task.wait(0.5)
             local anyActive = State.AutoBanner
             for _, g in ipairs(GachaData) do
                 if State.GachaEnabled[g.id] then anyActive=true; break end
@@ -866,14 +953,12 @@ ExtrasLeft:Button({ Name="Manual Champion Spin", Callback=function()
 end })
 ExtrasLeft:Button({ Name="Force Stop Champions", Callback=function()
     Actions.GachaStop("Champions")
-    Window:Notify({ Title="Champions", Description="Stopped", Lifetime=2 })
 end })
 
 ExtrasLeft:Divider()
 ExtrasLeft:Header({ Name = "Auto Rankup" })
 ExtrasLeft:Toggle({ Name="Auto Rankup Power", Default=false, Callback=function(v) State.AutoRankup = v end }, "AutoRankup")
-ExtrasLeft:Slider({ Name="Rankup Delay", Default=2, Minimum=0.5, Maximum=30, Precision=1,
-    Callback=function(v) State.RankupDelay = v end }, "RankupDelay")
+ExtrasLeft:Slider({ Name="Rankup Delay", Default=2, Minimum=0.5, Maximum=30, Precision=1, Callback=function(v) State.RankupDelay = v end }, "RankupDelay")
 
 ExtrasRight:Header({ Name = "Auto Gacha (" .. #GachaData .. ")" })
 for _, gacha in ipairs(GachaData) do
@@ -886,10 +971,8 @@ for _, gacha in ipairs(GachaData) do
             State.GachaEnabled[gacha.id] = v
             if v then
                 Actions.HiddenSpin(gacha.id)
-                Window:Notify({ Title=gacha.display, Description="Started", Lifetime=2 })
             else
-                Actions.GachaStop(gacha.id)
-                task.wait(0.5)
+                Actions.GachaStop(gacha.id); task.wait(0.5)
                 local anyActive = State.AutoChampSpin or State.AutoBanner
                 for _, g in ipairs(GachaData) do
                     if State.GachaEnabled[g.id] then anyActive=true; break end
@@ -903,7 +986,6 @@ ExtrasRight:Divider()
 ExtrasRight:Button({ Name="Stop All Gacha", Callback=function()
     for _, g in ipairs(GachaData) do Actions.GachaStop(g.id) end
     Actions.GachaStop("Champions")
-    Window:Notify({ Title="Gacha", Description="All stopped", Lifetime=2 })
 end })
 
 -- ── SUMMON TAB ──────────────────────────────────────────────
@@ -915,34 +997,27 @@ SummonLeft:Toggle({
     Name="Auto Banner Summon", Default=false,
     Callback=function(v)
         State.AutoBanner = v
-        if v then
-            Window:Notify({ Title="Banner", Description="Auto summon started", Lifetime=2 })
-        else
+        if not v then
             task.wait(0.5)
             local anyActive = State.AutoChampSpin
             for _, g in ipairs(GachaData) do
                 if State.GachaEnabled[g.id] then anyActive=true; break end
             end
             if not anyActive then ShowSpinPopups() end
-            Window:Notify({ Title="Banner", Description="Stopped", Lifetime=2 })
         end
     end,
 }, "AutoBanner")
 
-SummonLeft:Dropdown({ Name="Banner",          Multi=false, Required=true, Options=#BannerData>0 and BannerData or {"(none)"}, Default=1, Callback=function(v) State.BannerName     = v   end }, "BannerName")
-SummonLeft:Dropdown({ Name="Rolls per Summon",Multi=false, Required=true, Options={"1","10"},   Default=2,                   Callback=function(v) State.BannerCount    = tonumber(v) or 10 end }, "BannerCount")
-SummonLeft:Dropdown({ Name="Ticket Type",     Multi=false, Required=true, Options={"Normal","Premium"}, Default=1,           Callback=function(v) State.BannerRollType = v   end }, "BannerRollType")
+SummonLeft:Dropdown({ Name="Banner",          Multi=false, Required=true, Options=#BannerData>0 and BannerData or {"(none)"}, Default=1, Callback=function(v) State.BannerName    = v end }, "BannerName")
+SummonLeft:Dropdown({ Name="Rolls per Summon",Multi=false, Required=true, Options={"1","10"},   Default=2,                     Callback=function(v) State.BannerCount   = tonumber(v) or 10 end }, "BannerCount")
+SummonLeft:Dropdown({ Name="Ticket Type",     Multi=false, Required=true, Options={"Normal","Premium"}, Default=1,             Callback=function(v) State.BannerRollType = v end }, "BannerRollType")
 SummonLeft:Slider({ Name="Summon Delay", Default=5, Minimum=1, Maximum=60, Precision=1, Callback=function(v) State.BannerDelay = v end }, "BannerDelay")
 SummonLeft:Button({ Name="Manual Summon", Callback=function()
     Actions.HiddenBannerRoll(State.BannerName, State.BannerCount, State.BannerRollType)
-    Window:Notify({ Title="Banner", Description=State.BannerName.." x"..State.BannerCount, Lifetime=2 })
 end })
 
 SummonRight:Header({ Name = "Available Banners" })
 for _, b in ipairs(BannerData) do SummonRight:Label({ Text="• "..b }) end
-SummonRight:Divider()
-SummonRight:Label({ Text="Normal  = standard tickets" })
-SummonRight:Label({ Text="Premium = premium tickets"  })
 
 -- ── TELEPORT TAB ────────────────────────────────────────────
 local TeleLeft  = Tabs.Teleport:Section({ Side="Left"  })
@@ -957,7 +1032,6 @@ for i, zone in ipairs(ZoneData) do
         Callback = function()
             Actions.Teleport(zone.id)
             invalidateTarget()
-            Window:Notify({ Title="Teleport", Description="→ "..zone.display, Lifetime=2 })
         end,
     })
 end
@@ -965,6 +1039,31 @@ end
 -- ── SETTINGS TAB ────────────────────────────────────────────
 MacLib:SetFolder("AnimeStars")
 Tabs.Settings:InsertConfigSection("Left")
+
+local SettingsRight = Tabs.Settings:Section({ Side="Right" })
+SettingsRight:Header({ Name = "Script" })
+SettingsRight:Label({ Text = "Anime Stars v4.1" })
+SettingsRight:SubLabel({ Text = "Toggle UI: Right Shift" })
+SettingsRight:Divider()
+SettingsRight:Button({
+    Name = "Unload Script",
+    Callback = function()
+        Window:Dialog({
+            Title = "Unload Script",
+            Description = "Are you sure? All auto-features will stop.",
+            Buttons = {
+                { Name="Unload", Callback = function() task.wait(0.2); Window:Unload() end },
+                { Name="Cancel" },
+            },
+        })
+    end,
+})
+SettingsRight:Button({
+    Name = "Rejoin Server",
+    Callback = function()
+        game:GetService("TeleportService"):Teleport(game.PlaceId, LocalPlayer)
+    end,
+})
 
 -- ═══════════════════════════════════════════════════════════
 -- HEARTBEAT: POSITIONING
@@ -1006,7 +1105,7 @@ RunService.Heartbeat:Connect(function()
             for _, p in ipairs(livePos) do sum = sum + p end
             local center = sum / #livePos
             targetPos = Vector3.new(center.X, mobHrp.Position.Y, center.Z)
-            lookAt    = mobHrp.Position
+            lookAt = mobHrp.Position
             currentGroupSize = #livePos
         else
             local dir = (myHrp.Position - mobHrp.Position)
@@ -1050,12 +1149,9 @@ task.spawn(function()
             needNewTarget = false
             local filter, ignoreRange = nil, false
 
-            -- Priority mob overrides everything
             if State.PriorityMob and next(State.SelectedMob) then
                 filter      = { mobNames = State.SelectedMob }
                 ignoreRange = true
-
-            -- Quest filter: use module data directly
             elseif State.AutoQuest and ActiveQuestFilter then
                 filter      = ActiveQuestFilter
                 ignoreRange = true
@@ -1097,40 +1193,23 @@ task.spawn(function()
 end)
 
 -- ═══════════════════════════════════════════════════════════
--- SKILL / ULTIMATE / RANKUP LOOPS
+-- SKILL / ULTIMATE / RANKUP / BANNER LOOPS
 -- ═══════════════════════════════════════════════════════════
-task.spawn(function()
-    while true do
-        if State.AutoSkill    then Actions.CastSkill();    task.wait(State.SkillDelay)
-        else task.wait(0.5) end
-    end
-end)
-task.spawn(function()
-    while true do
-        if State.AutoUltimate then Actions.CastUltimate(); task.wait(State.UltDelay)
-        else task.wait(0.5) end
-    end
-end)
-task.spawn(function()
-    while true do
-        if State.AutoRankup   then Actions.RankupPower();  task.wait(State.RankupDelay)
-        else task.wait(0.5) end
-    end
-end)
-
--- ═══════════════════════════════════════════════════════════
--- BANNER LOOP
--- ═══════════════════════════════════════════════════════════
-task.spawn(function()
-    while true do
-        if State.AutoBanner then
-            Actions.HiddenBannerRoll(State.BannerName, State.BannerCount, State.BannerRollType)
-            task.wait(State.BannerDelay)
-        else
-            task.wait(1)
-        end
-    end
-end)
+task.spawn(function() while true do
+    if State.AutoSkill    then Actions.CastSkill();    task.wait(State.SkillDelay)  else task.wait(0.5) end
+end end)
+task.spawn(function() while true do
+    if State.AutoUltimate then Actions.CastUltimate(); task.wait(State.UltDelay)    else task.wait(0.5) end
+end end)
+task.spawn(function() while true do
+    if State.AutoRankup   then Actions.RankupPower();  task.wait(State.RankupDelay) else task.wait(0.5) end
+end end)
+task.spawn(function() while true do
+    if State.AutoBanner   then
+        Actions.HiddenBannerRoll(State.BannerName, State.BannerCount, State.BannerRollType)
+        task.wait(State.BannerDelay)
+    else task.wait(1) end
+end end)
 
 -- ═══════════════════════════════════════════════════════════
 -- GACHA / CHAMPION WATCHDOG
@@ -1163,11 +1242,14 @@ task.spawn(function()
 end)
 
 -- ═══════════════════════════════════════════════════════════
--- QUEST + UI UPDATE LOOP  (core of the new system)
+-- MAIN QUEST + UI UPDATE LOOP
 -- ═══════════════════════════════════════════════════════════
 task.spawn(function()
-    while task.wait(1.5) do
-        -- Update main tab labels
+    while task.wait(1.0) do
+        local newQuest = GetActiveQuest()
+        ActiveQuest       = newQuest
+        ActiveQuestFilter = BuildFilterFromQuest(newQuest)
+
         pcall(function()
             HeroLabel:SetText("Hero: " .. GetCurrentHero())
             GroupLabel:SetText(State.SmartGroup and currentGroupSize > 1
@@ -1179,101 +1261,106 @@ task.spawn(function()
             else
                 TargetLabel:SetText("Target: (searching...)")
             end
-        end)
-
-        -- Read live GUI for progress + claim state
-        local gui = GetActiveQuestFromGUI()
-
-        if gui then
-            -- Match to module quest
-            local matched = MatchGUIQuestToModule(gui.title)
-
-            -- Update ActiveQuestLine and filter
-            if matched then
-                ActiveQuestLine   = matched
-                ActiveQuestFilter = BuildQuestFilter(matched)
+            if ActiveQuestFilter then
+                FilterLabel:SetText(string.format("Filter: %s @ %s",
+                    ActiveQuestFilter.difficulty or "?",
+                    ActiveQuestFilter.zoneId and (ZoneDisplayNames[ActiveQuestFilter.zoneId] or ActiveQuestFilter.zoneId) or "any"))
             else
-                -- GUI quest not found in module — keep last known or nil
-                if not ActiveQuestLine then
-                    ActiveQuestFilter = nil
-                end
+                FilterLabel:SetText("Filter: -")
             end
+            local cz = GetPlayerCurrentZone()
+            ZoneLabel:SetText("Current Zone: " .. (cz and (ZoneDisplayNames[cz] or cz) or "unknown"))
 
-            -- Update quest tab labels
-            pcall(function()
-                if ActiveQuestLine then
-                    local obj = ActiveQuestLine.objective or {}
-                    QLabelName:SetText("Name: " .. ActiveQuestLine.name)
-                    QLabelZone:SetText("Zone: " .. (ZoneDisplayNames[obj.TargetZone] or obj.TargetZone or "?"))
-                    QLabelDiff:SetText("Difficulty: " .. (obj.Target or "?"))
-                    QLabelGoal:SetText("Goal: " .. tostring(obj.Goal or "?"))
-                else
-                    QLabelName:SetText("Name: " .. gui.title)
-                    QLabelZone:SetText("Zone: (unmatched)")
-                    QLabelDiff:SetText("Difficulty: -")
-                    QLabelGoal:SetText("Goal: -")
-                end
-                QLabelProgress:SetText("Progress: " .. gui.progress)
-                QLabelClaim:SetText("Claim Ready: " .. (gui.canClaim and "YES ✓" or "No"))
-            end)
-
-            -- Auto Claim
-            if State.AutoQuest and State.AutoClaim and gui.canClaim then
-                task.wait(0.5)
-                ClickClaimButton()
-                ActiveQuestLine   = nil
-                ActiveQuestFilter = nil
-                invalidateTarget()
-                Window:Notify({ Title="Auto Claim", Description="Quest claimed!", Lifetime=2 })
-                task.wait(2)
-                continue
-            end
-
-            -- Auto Teleport — uses zoneId from MODULE data, not text parsing
-            if State.AutoQuest and State.AutoTeleport
-                and ActiveQuestFilter and ActiveQuestFilter.zoneId
-                and not State.PriorityMob
-            then
-                if tick() - lastZoneTeleport > 10 then
-                    local hasMatchingMobs = false
-                    local enemies = Workspace:FindFirstChild("Enemies")
-                    if enemies then
-                        for _, mob in ipairs(enemies:GetChildren()) do
-                            local mobHum = mob:FindFirstChildOfClass("Humanoid")
-                            if mobHum and mobHum.Health > 0 and MatchesFilter(mob, ActiveQuestFilter) then
-                                hasMatchingMobs = true; break
-                            end
-                        end
-                    end
-                    if not hasMatchingMobs then
-                        local zoneName = ZoneDisplayNames[ActiveQuestFilter.zoneId] or ActiveQuestFilter.zoneId
-                        Actions.Teleport(ActiveQuestFilter.zoneId)
-                        lastZoneTeleport = tick()
-                        invalidateTarget()
-                        Window:Notify({ Title="Auto Quest", Description="TP → "..zoneName, Lifetime=3 })
-                        task.wait(5)
-                    end
-                end
-            end
-
-        else
-            -- No active quest in GUI
-            ActiveQuestLine   = nil
-            ActiveQuestFilter = nil
-            pcall(function()
-                QLabelName:SetText("Name: (none)")
+            if ActiveQuest then
+                QLabelName:SetText("Name: " .. (ActiveQuest.name or "?"))
+                QLabelId:SetText("ID: " .. ActiveQuest.missionId)
+                QLabelZone:SetText("Zone: " .. (ZoneDisplayNames[ActiveQuest.zoneId] or ActiveQuest.zoneId or "?"))
+                QLabelDiff:SetText("Difficulty: " .. (ActiveQuest.objective.Target or "?"))
+                QLabelProgress:SetText("Progress: " .. ActiveQuest.progress .. "/" .. ActiveQuest.goal)
+                QLabelStatus:SetText("Status: " .. (ActiveQuest.completed and "READY TO CLAIM ✓" or "In Progress"))
+            else
+                QLabelName:SetText("Name: (no active quest)")
+                QLabelId:SetText("ID: -")
                 QLabelZone:SetText("Zone: -")
                 QLabelDiff:SetText("Difficulty: -")
-                QLabelGoal:SetText("Goal: -")
                 QLabelProgress:SetText("Progress: -")
-                QLabelClaim:SetText("Claim Ready: No")
-            end)
+                QLabelStatus:SetText("Status: -")
+            end
+
+            local missions = GetMissionsData()
+            if missions and missions.OnGoing then
+                local lines = {}
+                for id, d in pairs(missions.OnGoing) do
+                    local marker = d.Completed and "✓" or " "
+                    table.insert(lines, string.format("[%s] %s: %s/%s",
+                        marker, id, tostring(d.Progress or 0), tostring(d.Goal)))
+                end
+                table.sort(lines)
+                OnGoingSummaryLabel:SetText(#lines > 0 and table.concat(lines, "\n") or "(none)")
+            end
+        end)
+
+        if State.AutoQuest and State.AutoClaim and ActiveQuest and ActiveQuest.completed then
+            ClaimQuest(ActiveQuest)
+            Window:Notify({ Title="Auto Claim", Description="Claimed: "..ActiveQuest.name, Lifetime=3 })
+            invalidateTarget()
+            task.wait(2)
+            continue
+        end
+
+        if State.AutoQuest and State.AutoTeleport
+            and ActiveQuestFilter and ActiveQuestFilter.zoneId
+            and not State.PriorityMob
+        then
+            if tick() - lastZoneTeleport > 8 then
+                local currentZone = GetPlayerCurrentZone()
+                local alreadyInZone = (currentZone == ActiveQuestFilter.zoneId)
+
+                local exactMatches = 0
+                for _, e in ipairs(IterateLiveEnemies()) do
+                    if MatchesFilter(e.model, ActiveQuestFilter) then
+                        exactMatches = exactMatches + 1
+                    end
+                end
+
+                if exactMatches == 0 and not alreadyInZone then
+                    local zoneName = ZoneDisplayNames[ActiveQuestFilter.zoneId] or ActiveQuestFilter.zoneId
+                    Actions.Teleport(ActiveQuestFilter.zoneId)
+                    lastZoneTeleport = tick()
+                    invalidateTarget()
+                    Window:Notify({ Title="Auto Quest", Description="TP → "..zoneName, Lifetime=3 })
+                    task.wait(5)
+                    continue
+                end
+            end
+        end
+
+        -- Wrong difficulty auto-swap
+        if State.AutoQuest and ActiveQuestFilter and currentTarget and currentTarget.Parent then
+            local info = GetMobInfo(currentTarget)
+            if info.difficulty then
+                local actual = info.difficulty
+                local wanted = ActiveQuestFilter.difficulty
+                local matches = (actual == wanted)
+                if wanted == "boss" and (actual == "boss" or (info.name and IsChampion(info.name))) then
+                    matches = true
+                end
+                if not matches then
+                    local hasBetter = false
+                    for _, e in ipairs(IterateLiveEnemies()) do
+                        if MatchesFilter(e.model, ActiveQuestFilter) then
+                            hasBetter = true; break
+                        end
+                    end
+                    if hasBetter then invalidateTarget() end
+                end
+            end
         end
     end
 end)
 
 -- ═══════════════════════════════════════════════════════════
--- CHARACTER RESET + UNLOAD
+-- CHARACTER + UNLOAD
 -- ═══════════════════════════════════════════════════════════
 LocalPlayer.CharacterAdded:Connect(function(char)
     task.wait(0.5)
@@ -1302,8 +1389,7 @@ Tabs.Main:Select()
 MacLib:LoadAutoLoadConfig()
 
 Window:Notify({
-    Title       = "Anime Stars v3.1",
-    Description = string.format("%d zones | %d gachas | %d banners | %d quest lines",
-        #ZoneData, #GachaData, #BannerData, #AllQuestLines),
+    Title       = "Anime Stars v4.1",
+    Description = "Loaded with EnemiesManager integration",
     Lifetime    = 5,
 })

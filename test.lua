@@ -1,8 +1,17 @@
 -- ═══════════════════════════════════════════════════════════
--- ANIME STARS SCRIPT v4.1 - EnemiesManager + Data-Driven Quests
+-- ANIME STARS SCRIPT v5.0 - Obsidian UI + Data-Driven
 -- ═══════════════════════════════════════════════════════════
 
-local MacLib = loadstring(game:HttpGet("https://github.com/biggaboy212/Maclib/releases/latest/download/maclib.txt"))()
+local repo = "https://raw.githubusercontent.com/deividcomsono/Obsidian/main/"
+local Library = loadstring(game:HttpGet(repo .. "Library.lua"))()
+local ThemeManager = loadstring(game:HttpGet(repo .. "addons/ThemeManager.lua"))()
+local SaveManager = loadstring(game:HttpGet(repo .. "addons/SaveManager.lua"))()
+
+local Options = Library.Options
+local Toggles = Library.Toggles
+
+Library.ForceCheckbox = false
+Library.ShowToggleFrameInKeybinds = true
 
 local Players           = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -25,22 +34,21 @@ end)
 -- LOAD GAME MODULES
 -- ═══════════════════════════════════════════════════════════
 local ProfileManager, QuestUtils, QuestsDirectory, EnemiesManager, EnemiesDir, ZonesManager
-
 do
     local ok, mod = pcall(require, ReplicatedStorage.Client.General.ProfileManager)
-    if ok then ProfileManager = mod else warn("[v4.1] ProfileManager failed:", mod) end
+    if ok then ProfileManager = mod end
 
     local ok2, mod2 = pcall(require, ReplicatedStorage.Client.Utils.QuestUtils)
-    if ok2 then QuestUtils = mod2 else warn("[v4.1] QuestUtils failed:", mod2) end
+    if ok2 then QuestUtils = mod2 end
 
     local ok3, mod3 = pcall(require, ReplicatedStorage.Shared.Directory.Quests)
-    if ok3 then QuestsDirectory = mod3 else warn("[v4.1] Quests dir failed:", mod3) end
+    if ok3 then QuestsDirectory = mod3 end
 
     local ok4, mod4 = pcall(require, ReplicatedStorage.Client.Zones.EnemiesManager)
-    if ok4 then EnemiesManager = mod4 else warn("[v4.1] EnemiesManager failed:", mod4) end
+    if ok4 then EnemiesManager = mod4 end
 
     local ok5, mod5 = pcall(require, ReplicatedStorage.Shared.Directory.Enemies)
-    if ok5 then EnemiesDir = mod5 else warn("[v4.1] Enemies dir failed:", mod5) end
+    if ok5 then EnemiesDir = mod5 end
 
     local ok6, mod6 = pcall(function()
         local m = ReplicatedStorage.Client:FindFirstChild("Zones")
@@ -51,26 +59,20 @@ do
 end
 
 local DIFFICULTY_MAP = {
-    ["Easy"]       = "easy",
-    ["Medium"]     = "medium",
-    ["Hard"]       = "hard",
-    ["Ultra Hard"] = "ultrahard",
-    ["Boss"]       = "boss",
+    ["Easy"]="easy",["Medium"]="medium",["Hard"]="hard",
+    ["Ultra Hard"]="ultrahard",["Boss"]="boss",
 }
-
--- Reverse map: config difficulty tag → internal
--- The config's Difficulty field might be same strings or different
 local CONFIG_DIFF_MAP = {
-    ["Easy"]      = "easy",   ["easy"]      = "easy",
-    ["Medium"]    = "medium", ["medium"]    = "medium",
-    ["Hard"]      = "hard",   ["hard"]      = "hard",
-    ["UltraHard"] = "ultrahard", ["Ultra Hard"] = "ultrahard", ["ultrahard"] = "ultrahard",
-    ["Boss"]      = "boss",   ["boss"]      = "boss",
-    ["Champion"]  = "boss",   ["champion"]  = "boss",
+    ["Easy"]="easy",["easy"]="easy",
+    ["Medium"]="medium",["medium"]="medium",
+    ["Hard"]="hard",["hard"]="hard",
+    ["UltraHard"]="ultrahard",["Ultra Hard"]="ultrahard",["ultrahard"]="ultrahard",
+    ["Boss"]="boss",["boss"]="boss",
+    ["Champion"]="boss",["champion"]="boss",
 }
 
 -- ═══════════════════════════════════════════════════════════
--- DYNAMIC DATA LOADERS
+-- DATA LOADERS
 -- ═══════════════════════════════════════════════════════════
 local function LoadZones()
     local zones, nameToId = {}, {}
@@ -147,9 +149,7 @@ local function LoadBanners()
     local result = {}
     local dir = ReplicatedStorage.Shared.Directory.Banners:FindFirstChild("_Index")
     if dir then
-        for _, b in ipairs(dir:GetChildren()) do
-            table.insert(result, b.Name)
-        end
+        for _, b in ipairs(dir:GetChildren()) do table.insert(result, b.Name) end
     end
     return result
 end
@@ -188,11 +188,10 @@ for _, z in ipairs(ZoneData) do
     end
 end
 
-print(string.format("[Anime Stars v4.1] Zones: %d | Gachas: %d | Banners: %d",
+print(string.format("[Anime Stars v5.0] Zones:%d Gachas:%d Banners:%d",
     #ZoneData, #GachaData, #BannerData))
 print("  ProfileManager: ", ProfileManager and "OK" or "MISSING")
 print("  QuestUtils:     ", QuestUtils     and "OK" or "MISSING")
-print("  QuestsDirectory:", QuestsDirectory and "OK" or "MISSING")
 print("  EnemiesManager: ", EnemiesManager and "OK" or "MISSING")
 print("  EnemiesDir:     ", EnemiesDir     and "OK" or "MISSING")
 
@@ -204,7 +203,6 @@ local POPUPS_TO_HIDE = {
     "BlessingPopup","SkillPopup","WeaponPopup","IndexPopup",
     "TitlePopup","SkillTreePopup","BannerPopup",
 }
-
 local function HideSpinPopups()
     pcall(function()
         local summon = LocalPlayer.PlayerGui:FindFirstChild("Summon")
@@ -218,7 +216,6 @@ local function HideSpinPopups()
         end
     end)
 end
-
 local function ShowSpinPopups()
     pcall(function()
         local summon = LocalPlayer.PlayerGui:FindFirstChild("Summon")
@@ -227,23 +224,15 @@ local function ShowSpinPopups()
 end
 
 -- ═══════════════════════════════════════════════════════════
--- ENEMY DATA — via EnemiesManager (much more reliable)
+-- ENEMY DATA — via EnemiesManager
 -- ═══════════════════════════════════════════════════════════
-
--- Try to reach into the enemy's data via EnemiesManager, otherwise fall back to GUI
 local function GetEnemyDataForModel(mobModel)
     if not EnemiesManager then return nil end
-    -- EnemiesManager stores enemies keyed by their unique ID (a string)
-    -- The mob model's Name usually IS this ID
     local ok, allEnemies = pcall(function() return EnemiesManager:GetAllEnemies() end)
     if not ok or type(allEnemies) ~= "table" then return nil end
-
-    -- Try direct lookup by model name (usually matches)
     local direct = allEnemies[mobModel.Name]
     if direct then return direct end
-
-    -- Try matching by model reference (some enemies expose .Model)
-    for id, enemy in pairs(allEnemies) do
+    for _, enemy in pairs(allEnemies) do
         if type(enemy) == "table" then
             local m = enemy.Model or enemy.model or enemy._model
             if m == mobModel then return enemy end
@@ -252,38 +241,26 @@ local function GetEnemyDataForModel(mobModel)
     return nil
 end
 
--- Gets enemy config (Index, DisplayName, Difficulty, etc.) from mob model
 local function GetEnemyConfig(mobModel)
     if not mobModel then return nil end
-
-    -- Approach 1: check model attributes
     local index = mobModel:GetAttribute("Index")
-        or mobModel:GetAttribute("EnemyIndex")
-        or mobModel:GetAttribute("ConfigId")
-
+        or mobModel:GetAttribute("EnemyIndex") or mobModel:GetAttribute("ConfigId")
     if index and EnemiesDir and EnemiesDir.GetConfig then
         local ok, cfg = pcall(EnemiesDir.GetConfig, EnemiesDir, index)
         if ok and cfg then return cfg end
     end
-
-    -- Approach 2: via EnemiesManager
     local enemyData = GetEnemyDataForModel(mobModel)
     if enemyData then
-        -- Try various common field names
         local cfg = enemyData.Config or enemyData.config or enemyData._config
         if cfg then return cfg end
-
         local idx = enemyData.Index or (enemyData.Data and enemyData.Data.Index)
         if idx and EnemiesDir and EnemiesDir.GetConfig then
             local ok, cfg2 = pcall(EnemiesDir.GetConfig, EnemiesDir, idx)
             if ok and cfg2 then return cfg2 end
         end
     end
-
-    -- Approach 3: search EnemiesDir by DisplayName (from GUI or model name)
     local displayName = mobModel:GetAttribute("DisplayName")
     if not displayName then
-        -- Fallback to GUI reading
         for _, gui in ipairs(LocalPlayer.PlayerGui:GetChildren()) do
             if gui.Name == "Enemy" and gui:IsA("BillboardGui") then
                 if gui.Adornee and (gui.Adornee == mobModel or gui.Adornee:IsDescendantOf(mobModel)) then
@@ -295,15 +272,13 @@ local function GetEnemyConfig(mobModel)
             end
         end
     end
-
-    if displayName and EnemiesDir then
-        -- Search all enemy configs for matching DisplayName
+    if displayName then
         local dir = ReplicatedStorage.Shared.Directory.Enemies:FindFirstChild("_Index")
         if dir then
             for _, zoneModule in ipairs(dir:GetChildren()) do
                 local ok, data = pcall(require, zoneModule)
                 if ok and type(data) == "table" then
-                    for enemyId, enemyData in pairs(data) do
+                    for _, enemyData in pairs(data) do
                         if type(enemyData) == "table" and enemyData.DisplayName == displayName then
                             return enemyData
                         end
@@ -312,14 +287,11 @@ local function GetEnemyConfig(mobModel)
             end
         end
     end
-
     return nil
 end
 
--- Returns {name, difficulty, zone, isChampion} for a mob model
 local function GetMobInfo(mobModel)
     if not mobModel then return { name=nil, difficulty=nil } end
-
     local cfg = GetEnemyConfig(mobModel)
     if cfg then
         local diff = cfg.Difficulty or cfg.difficulty
@@ -327,13 +299,10 @@ local function GetMobInfo(mobModel)
         return {
             name       = cfg.DisplayName or cfg.Name,
             difficulty = normDiff or (diff and diff:lower():gsub("%s+","")) or nil,
-            configDifficulty = diff,
             zone       = cfg.Zone or cfg.zone,
             isBoss     = cfg.IsBoss or cfg.Boss or (normDiff == "boss"),
         }
     end
-
-    -- Ultimate fallback: GUI parsing (old behavior)
     for _, gui in ipairs(LocalPlayer.PlayerGui:GetChildren()) do
         if gui.Name == "Enemy" and gui:IsA("BillboardGui") then
             if gui.Adornee and (gui.Adornee == mobModel or gui.Adornee:IsDescendantOf(mobModel)) then
@@ -345,19 +314,12 @@ local function GetMobInfo(mobModel)
                     return {
                         name       = title and title:IsA("TextLabel") and title.Text or nil,
                         difficulty = diffText and diffText:lower():gsub("%s+","") or nil,
-                        configDifficulty = diffText,
                     }
                 end
             end
         end
     end
-
     return { name=nil, difficulty=nil }
-end
-
-local function NormDiff(str)
-    if not str then return nil end
-    return str:lower():gsub("%s+","")
 end
 
 local function IsChampion(mobName)
@@ -379,7 +341,6 @@ local function NameMatches(actualName, wantedName)
     return false
 end
 
--- filter: { mobNames = {["name"]=true}, difficulty = "ultrahard", zoneId = "..." }
 local function MatchesFilter(mobModel, filter)
     if not filter then return true end
     local info = GetMobInfo(mobModel)
@@ -394,9 +355,6 @@ local function MatchesFilter(mobModel, filter)
             end
         end
         if not nameMatched then return false end
-    elseif filter.mobName then
-        if not info.name then return false end
-        if not NameMatches(info.name, filter.mobName) then return false end
     end
 
     if filter.difficulty then
@@ -415,10 +373,8 @@ local function MatchesFilter(mobModel, filter)
     return true
 end
 
--- Enumerate live enemies via EnemiesManager (or fall back to Workspace scan)
 local function IterateLiveEnemies()
     local results = {}
-
     if EnemiesManager then
         local ok, allEnemies = pcall(function() return EnemiesManager:GetAllEnemies() end)
         if ok and type(allEnemies) == "table" then
@@ -426,7 +382,6 @@ local function IterateLiveEnemies()
                 if type(enemy) == "table" then
                     local model = enemy.Model or enemy.model or enemy._model
                     if not model then
-                        -- Try finding by name
                         local enemies = Workspace:FindFirstChild("Enemies")
                         if enemies then model = enemies:FindFirstChild(id) end
                     end
@@ -434,7 +389,7 @@ local function IterateLiveEnemies()
                         local hum = model:FindFirstChildOfClass("Humanoid")
                         local hrp = model:FindFirstChild("HumanoidRootPart")
                         if hum and hum.Health > 0 and hrp then
-                            table.insert(results, { model=model, hrp=hrp, hum=hum, enemyData=enemy, id=id })
+                            table.insert(results, { model=model, hrp=hrp, hum=hum })
                         end
                     end
                 end
@@ -442,8 +397,6 @@ local function IterateLiveEnemies()
             if #results > 0 then return results end
         end
     end
-
-    -- Fallback: Workspace.Enemies scan
     local enemies = Workspace:FindFirstChild("Enemies")
     if enemies then
         for _, mob in ipairs(enemies:GetChildren()) do
@@ -462,7 +415,6 @@ local function GetAllMatchingMobs(filter, ignoreRange)
     if not char then return {} end
     local hrp = char:FindFirstChild("HumanoidRootPart")
     if not hrp then return {} end
-
     local maxDist = ignoreRange and math.huge or 2000
     local mobs = {}
     for _, e in ipairs(IterateLiveEnemies()) do
@@ -517,12 +469,9 @@ function Actions.BannerRoll(b,c,t)     Remote:FireServer({{Path="banner/requestR
 function Actions.ClaimMission(line, index)
     Remote:FireServer({{Path="missions/claim", Params={line, index}}})
 end
-function Actions.PinMission(missionId)
-    Remote:FireServer({{Path="missions/pin", Params={missionId}}})
-end
-function Actions.HiddenSpin(name)        HideSpinPopups(); Actions.GachaSpin(name);    task.wait(0.1); HideSpinPopups() end
-function Actions.HiddenChampionSpin(z)   HideSpinPopups(); Actions.ChampionSpin(z);    task.wait(0.1); HideSpinPopups() end
-function Actions.HiddenBannerRoll(b,c,t) HideSpinPopups(); Actions.BannerRoll(b,c,t);  task.wait(0.1); HideSpinPopups() end
+function Actions.HiddenSpin(name)        HideSpinPopups(); Actions.GachaSpin(name);   task.wait(0.1); HideSpinPopups() end
+function Actions.HiddenChampionSpin(z)   HideSpinPopups(); Actions.ChampionSpin(z);   task.wait(0.1); HideSpinPopups() end
+function Actions.HiddenBannerRoll(b,c,t) HideSpinPopups(); Actions.BannerRoll(b,c,t); task.wait(0.1); HideSpinPopups() end
 
 local function GetCurrentHero()
     local char = LocalPlayer.Character
@@ -567,7 +516,6 @@ local function BuildQuestInfo(missionId, ongoingData)
     if not missionId or not ongoingData then return nil end
     local stage, lineConfig, lineName, idx = GetStageConfig(missionId)
     if not stage then return nil end
-
     local objective = stage.Objective or {}
     return {
         missionId   = missionId,
@@ -581,27 +529,22 @@ local function BuildQuestInfo(missionId, ongoingData)
         completed   = ongoingData.Completed == true,
         zoneId      = (lineConfig and lineConfig.ZoneRestriction) or objective.TargetZone,
         difficulty  = objective.Target and DIFFICULTY_MAP[objective.Target] or nil,
-        stage       = stage,
-        lineConfig  = lineConfig,
     }
 end
 
 local function GetActiveQuest()
     local missions = GetMissionsData()
     if not missions then return nil end
-
     local pinnedId = missions.Pinned and next(missions.Pinned) or nil
     if pinnedId and missions.OnGoing and missions.OnGoing[pinnedId] then
         return BuildQuestInfo(pinnedId, missions.OnGoing[pinnedId])
     end
-
     if QuestUtils and QuestUtils.mostRelevant then
         local ok, relevantId = pcall(QuestUtils.mostRelevant, missions, nil)
         if ok and relevantId and missions.OnGoing[relevantId] then
             return BuildQuestInfo(relevantId, missions.OnGoing[relevantId])
         end
     end
-
     if missions.OnGoing then
         for id, data in pairs(missions.OnGoing) do
             if not data.Completed and not (missions.Finished and missions.Finished[id]) then
@@ -628,7 +571,6 @@ local function ClaimQuest(quest)
 end
 
 local function GetPlayerCurrentZone()
-    -- Try ZonesManager first
     if ZonesManager and ZonesManager.GetCurrentZone then
         local ok, z = pcall(function() return ZonesManager:GetCurrentZone() end)
         if ok and z then return z end
@@ -642,44 +584,10 @@ local function GetPlayerCurrentZone()
 end
 
 -- ═══════════════════════════════════════════════════════════
--- STATE
+-- TARGET STATE
 -- ═══════════════════════════════════════════════════════════
-local State = {
-    AutoAttack     = false,
-    AutoQuest      = false,
-    AutoSkill      = false,
-    AutoUltimate   = false,
-    AutoRankup     = false,
-    AutoChampSpin  = false,
-    AutoBanner     = false,
-    SmartGroup     = true,
-    UseAnchor      = false,
-    PriorityMob    = false,
-    FallbackAny    = false,
-    AutoTeleport   = true,
-    AutoClaim      = true,
-
-    SkillDelay     = 5,
-    UltDelay       = 15,
-    RankupDelay    = 2,
-    GroupRadius    = 25,
-    BannerDelay    = 5,
-
-    SelectedZone   = FarmZoneList[1] or "",
-    SelectedMob    = {},
-    ChampZone      = ChampionSpinDisplay[1] or "",
-    BannerName     = BannerData[1] or "",
-    BannerCount    = 10,
-    BannerRollType = "Normal",
-
-    GachaEnabled   = {},
-}
-for _, g in ipairs(GachaData) do State.GachaEnabled[g.id] = false end
-
-local ActiveQuest       = nil
-local ActiveQuestFilter = nil
-local lastZoneTeleport  = 0
-
+local ActiveQuest, ActiveQuestFilter = nil, nil
+local lastZoneTeleport      = 0
 local currentTarget         = nil
 local currentGroup          = nil
 local currentGroupSize      = 0
@@ -706,168 +614,138 @@ local function setCurrentTarget(mob)
 end
 
 -- ═══════════════════════════════════════════════════════════
--- WINDOW
+-- WINDOW (Obsidian)
 -- ═══════════════════════════════════════════════════════════
-local Window = MacLib:Window({
-    Title    = "Anime Stars",
-    Subtitle = "v4.1",
-    Size     = UDim2.fromOffset(868, 650),
-    DragStyle = 1,
-    DisabledWindowControls = {},
-    ShowUserInfo  = true,
-    Keybind       = Enum.KeyCode.RightShift,
-    AcrylicBlur   = true,
+local Window = Library:CreateWindow({
+    Title = "Anime Stars",
+    Footer = "v5.0",
+    Icon = 95816097006870,
+    NotifySide = "Right",
+    ShowCustomCursor = true,
 })
 
-Window:GlobalSetting({ Name="UI Blur",        Default=Window:GetAcrylicBlurState(),   Callback=function(v) Window:SetAcrylicBlurState(v)   end })
-Window:GlobalSetting({ Name="Notifications",  Default=Window:GetNotificationsState(), Callback=function(v) Window:SetNotificationsState(v) end })
-Window:GlobalSetting({ Name="Show User Info", Default=Window:GetUserInfoState(),      Callback=function(v) Window:SetUserInfoState(v)      end })
-
-local TabGroup = Window:TabGroup()
 local Tabs = {
-    Main     = TabGroup:Tab({ Name="Main",     Image="rbxassetid://18821914323" }),
-    Farm     = TabGroup:Tab({ Name="Farm",     Image="rbxassetid://18821914323" }),
-    Quest    = TabGroup:Tab({ Name="Quest",    Image="rbxassetid://18821914323" }),
-    Extras   = TabGroup:Tab({ Name="Extras",   Image="rbxassetid://18821914323" }),
-    Summon   = TabGroup:Tab({ Name="Summon",   Image="rbxassetid://18821914323" }),
-    Teleport = TabGroup:Tab({ Name="Teleport", Image="rbxassetid://18821914323" }),
-    Settings = TabGroup:Tab({ Name="Settings", Image="rbxassetid://10734950309" }),
+    Main     = Window:AddTab("Main", "user"),
+    Farm     = Window:AddTab("Auto Farm", "swords"),
+    Quest    = Window:AddTab("Auto Quest", "scroll-text"),
+    Extras   = Window:AddTab("Auto Extras", "sparkles"),
+    Summon   = Window:AddTab("Auto Summon", "gift"),
+    Teleport = Window:AddTab("Teleports", "map"),
+    ["UI Settings"] = Window:AddTab("UI Settings", "settings"),
 }
 
 -- ── MAIN TAB ────────────────────────────────────────────────
-local MainLeft  = Tabs.Main:Section({ Side="Left"  })
-local MainRight = Tabs.Main:Section({ Side="Right" })
+local InfoGroup = Tabs.Main:AddLeftGroupbox("Status", "info")
+InfoGroup:AddLabel("Anime Stars v5.0", true)
+InfoGroup:AddLabel(string.format("Zones: %d | Gachas: %d | Banners: %d",
+    #ZoneData, #GachaData, #BannerData), true)
+local HeroLabel    = InfoGroup:AddLabel("Hero: " .. GetCurrentHero(), true)
+local GroupLabel   = InfoGroup:AddLabel("Group Farm: -", true)
+local TargetLabel  = InfoGroup:AddLabel("Target: -", true)
+local FilterLabel  = InfoGroup:AddLabel("Filter: -", true)
+local ZoneLabel    = InfoGroup:AddLabel("Current Zone: -", true)
 
-MainLeft:Header({ Name = "Status" })
-local HeroLabel   = MainLeft:Label({ Text = "Hero: " .. GetCurrentHero() })
-local GroupLabel  = MainLeft:Label({ Text = "Group Farm: -" })
-local TargetLabel = MainLeft:Label({ Text = "Target: -" })
-local FilterLabel = MainLeft:Label({ Text = "Filter: -" })
-local ZoneLabel   = MainLeft:Label({ Text = "Current Zone: -" })
-
-MainRight:Header({ Name = "Server" })
-MainRight:Button({ Name="Rejoin Server", Callback=function()
-    game:GetService("TeleportService"):Teleport(game.PlaceId, LocalPlayer)
-end })
-MainRight:Button({ Name="Restore Popups", Callback=function()
-    ShowSpinPopups()
-    Window:Notify({ Title="Popups", Description="Restored", Lifetime=3 })
-end })
+local ServerGroup = Tabs.Main:AddRightGroupbox("Server", "server")
+ServerGroup:AddButton({
+    Text = "Rejoin Server",
+    Func = function()
+        game:GetService("TeleportService"):Teleport(game.PlaceId, LocalPlayer)
+    end,
+})
+ServerGroup:AddButton({
+    Text = "Restore Popups",
+    Func = function()
+        ShowSpinPopups()
+        Library:Notify({ Title="Popups", Description="Restored", Time=3 })
+    end,
+})
 
 -- ── FARM TAB ────────────────────────────────────────────────
-local FarmLeft  = Tabs.Farm:Section({ Side="Left"  })
-local FarmRight = Tabs.Farm:Section({ Side="Right" })
+local FarmGroup = Tabs.Farm:AddLeftGroupbox("Auto Farm", "swords")
+FarmGroup:AddToggle("AutoAttack",   { Text="Auto Attack",       Default=false })
+FarmGroup:AddToggle("SmartGroup",   { Text="Smart Group Farm ★", Default=true })
+FarmGroup:AddSlider("GroupRadius",  {
+    Text="Group Detection Radius", Default=25, Min=10, Max=60, Rounding=0, Suffix=" studs",
+})
+FarmGroup:AddToggle("UseAnchor",    { Text="Anchor Mode", Default=false })
+FarmGroup:AddDivider()
+FarmGroup:AddToggle("AutoSkill",    { Text="Auto Skill", Default=false })
+FarmGroup:AddSlider("SkillDelay",   { Text="Skill Delay", Default=5, Min=1, Max=30, Rounding=1, Suffix="s" })
+FarmGroup:AddToggle("AutoUltimate", { Text="Auto Ultimate", Default=false })
+FarmGroup:AddSlider("UltDelay",     { Text="Ultimate Delay", Default=15, Min=5, Max=60, Rounding=1, Suffix="s" })
 
-FarmLeft:Header({ Name = "Auto Farm" })
-FarmLeft:Toggle({ Name="Auto Attack",      Default=false, Callback=function(v) State.AutoAttack = v end }, "AutoAttack")
-FarmLeft:Toggle({ Name="Smart Group Farm", Default=true,  Callback=function(v) State.SmartGroup = v; invalidateTarget() end }, "SmartGroup")
-FarmLeft:Slider({ Name="Group Radius", Default=25, Minimum=10, Maximum=60, Precision=0, Callback=function(v) State.GroupRadius = v end }, "GroupRadius")
-FarmLeft:Toggle({ Name="Anchor Mode", Default=false, Callback=function(v) State.UseAnchor = v end }, "UseAnchor")
+local TargetGroup = Tabs.Farm:AddRightGroupbox("Target Filter", "target")
+TargetGroup:AddToggle("PriorityMob", {
+    Text = "Prioritize Selected Mobs (overrides quest)",
+    Default = false,
+})
+TargetGroup:AddToggle("FallbackAny", {
+    Text = "Fallback: Any Mob if None Found",
+    Default = false,
+})
 
-FarmLeft:Divider()
-FarmLeft:Header({ Name = "Abilities" })
-FarmLeft:Toggle({ Name="Auto Skill",     Default=false, Callback=function(v) State.AutoSkill = v end }, "AutoSkill")
-FarmLeft:Slider({ Name="Skill Delay",    Default=5,  Minimum=1, Maximum=30, Precision=1, Callback=function(v) State.SkillDelay = v end }, "SkillDelay")
-FarmLeft:Toggle({ Name="Auto Ultimate",  Default=false, Callback=function(v) State.AutoUltimate = v end }, "AutoUltimate")
-FarmLeft:Slider({ Name="Ultimate Delay", Default=15, Minimum=5, Maximum=60, Precision=1, Callback=function(v) State.UltDelay = v end }, "UltDelay")
+local defaultFarmZone = FarmZoneList[1] or "Skylands"
+local defaultZoneId   = ZoneNameToId[defaultFarmZone] or ""
+local defaultMobList  = AllByZone[defaultZoneId] or {"(no mobs)"}
 
-FarmRight:Header({ Name = "Target Filter" })
-FarmRight:Toggle({ Name="Prioritize Selected Mobs",  Default=false, Callback=function(v) State.PriorityMob = v; invalidateTarget() end }, "PriorityMob")
-FarmRight:Toggle({ Name="Fallback: Any Mob if None", Default=false, Callback=function(v) State.FallbackAny = v; invalidateTarget() end }, "FallbackAny")
-
-local defaultFarmZone = FarmZoneList[1] or ""
-local defaultZoneId   = ZoneNameToId[defaultFarmZone]
-local defaultMobList  = AllByZone[defaultZoneId] or {}
-local MobDropdown
-
--- Forward-declare mob dropdown so zone callback can refresh it
-local MobDropdown
-
-FarmRight:Dropdown({
-    Name = "Zone",
-    Multi = false,
-    Required = true,
-    Options = FarmZoneList,
-    Default = 1,
-    Callback = function(v)
-        State.SelectedZone = v
-        State.SelectedMob = {}
-        invalidateTarget()
-        
-        local zId = ZoneNameToId[v]
-        local mList = AllByZone[zId] or {}
-        if #mList == 0 then mList = {"(no mobs)"} end
-        
-        if MobDropdown then
-            -- Try multiple MacLib refresh methods (varies by version)
-            local ok = pcall(function() MobDropdown:SetOptions(mList) end)
-            if not ok then
-                pcall(function() MobDropdown:Refresh(mList, true) end)
-            end
-            if not ok then
-                pcall(function() MobDropdown:UpdateOptions(mList) end)
-            end
-            -- Clear the current selection
-            pcall(function() MobDropdown:UpdateSelection(mList[1]) end)
-        end
-    end,
-}, "SelectedZone")
-
-MobDropdown = FarmRight:Dropdown({
-    Name = "Priority Mob",
-    Multi = false,
-    Required = false,
-    Options = #defaultMobList > 0 and defaultMobList or {"(none)"},
-    Default = 1,
-    Callback = function(v)
-        if v and v ~= "(no mobs)" and v ~= "(none)" then
-            State.SelectedMob = { [v] = true }
-        else
-            State.SelectedMob = {}
-        end
+TargetGroup:AddDropdown("SelectedZone", {
+    Values  = FarmZoneList,
+    Default = defaultFarmZone,
+    Text    = "Zone",
+    Callback = function(zoneName)
+        local zoneId = ZoneNameToId[zoneName]
+        local mobList = AllByZone[zoneId] or {}
+        if #mobList == 0 then mobList = {"(no mobs)"} end
+        -- Obsidian's clean way to refresh dropdown values:
+        Options.SelectedMob:SetValues(mobList)
+        Options.SelectedMob:SetValue({})
         invalidateTarget()
     end,
-}, "SelectedMob")
+})
+
+TargetGroup:AddDropdown("SelectedMob", {
+    Values     = defaultMobList,
+    Default    = defaultMobList[1],
+    Text       = "Priority Mobs (multi-select)",
+    Multi      = true,
+    Searchable = true,
+    Callback   = function()
+        invalidateTarget()
+    end,
+})
 
 -- ── QUEST TAB ───────────────────────────────────────────────
-local QuestLeft  = Tabs.Quest:Section({ Side="Left"  })
-local QuestRight = Tabs.Quest:Section({ Side="Right" })
-
-QuestLeft:Header({ Name = "Auto Quest" })
-QuestLeft:Toggle({ Name="Auto Quest",            Default=false, Callback=function(v) State.AutoQuest    = v end }, "AutoQuest")
-QuestLeft:Toggle({ Name="Auto Teleport to Zone", Default=true,  Callback=function(v) State.AutoTeleport = v end }, "AutoTeleport")
-QuestLeft:Toggle({ Name="Auto Claim",            Default=true,  Callback=function(v) State.AutoClaim    = v end }, "AutoClaim")
-
-QuestLeft:Button({
-    Name = "Manual Claim Active",
-    Callback = function()
+local QuestGroup = Tabs.Quest:AddLeftGroupbox("Auto Quest", "scroll-text")
+QuestGroup:AddToggle("AutoQuest",     { Text="Auto Quest",            Default=false })
+QuestGroup:AddToggle("AutoTeleport",  { Text="Auto Teleport to Zone", Default=true })
+QuestGroup:AddToggle("AutoClaim",     { Text="Auto Claim",            Default=true })
+QuestGroup:AddButton({
+    Text = "Manual Claim Active",
+    Func = function()
         if ActiveQuest and ActiveQuest.completed then
             ClaimQuest(ActiveQuest)
-            Window:Notify({ Title="Claim", Description="Claimed "..ActiveQuest.name, Lifetime=2 })
+            Library:Notify({ Title="Claim", Description="Claimed "..ActiveQuest.name, Time=2 })
         else
-            Window:Notify({ Title="Claim", Description="No completed quest", Lifetime=2 })
+            Library:Notify({ Title="Claim", Description="No completed quest", Time=2 })
         end
     end,
 })
 
-QuestLeft:Divider()
-QuestLeft:Header({ Name = "Active Quest" })
-local QLabelName     = QuestLeft:Label({ Text = "Name: -" })
-local QLabelId       = QuestLeft:Label({ Text = "ID: -" })
-local QLabelZone     = QuestLeft:Label({ Text = "Zone: -" })
-local QLabelDiff     = QuestLeft:Label({ Text = "Difficulty: -" })
-local QLabelProgress = QuestLeft:Label({ Text = "Progress: -" })
-local QLabelStatus   = QuestLeft:Label({ Text = "Status: -" })
+local ActiveQuestGroup = Tabs.Quest:AddLeftGroupbox("Active Quest Info", "book-open")
+local QLabelName     = ActiveQuestGroup:AddLabel("Name: -", true)
+local QLabelId       = ActiveQuestGroup:AddLabel("ID: -", true)
+local QLabelZone     = ActiveQuestGroup:AddLabel("Zone: -", true)
+local QLabelDiff     = ActiveQuestGroup:AddLabel("Difficulty: -", true)
+local QLabelProgress = ActiveQuestGroup:AddLabel("Progress: -", true)
+local QLabelStatus   = ActiveQuestGroup:AddLabel("Status: -", true)
 
-QuestLeft:Divider()
-QuestLeft:Header({ Name = "Debug" })
-
-QuestLeft:Button({
-    Name = "Debug Missions (Console)",
-    Callback = function()
+local DebugGroup = Tabs.Quest:AddRightGroupbox("Debug", "bug")
+DebugGroup:AddButton({
+    Text = "Debug Missions (Console)",
+    Func = function()
         print("\n=== MISSIONS DATA ===")
         local missions = GetMissionsData()
-        if not missions then print("No missions data"); return end
+        if not missions then print("No data"); return end
         print("[Pinned]")
         for k, v in pairs(missions.Pinned or {}) do print("  "..tostring(k).." = "..tostring(v)) end
         print("[OnGoing]")
@@ -876,29 +754,28 @@ QuestLeft:Button({
                 k, tostring(v.Progress or 0), tostring(v.Goal),
                 tostring(v.Completed)))
         end
-        print("\n[Active Selection]")
         local q = GetActiveQuest()
+        print("\n[Active]")
         if q then
-            print("  ID:", q.missionId, "| Name:", q.name)
-            print("  Zone:", q.zoneId, "| Diff:", q.difficulty)
-            print("  Progress:", q.progress .. "/" .. q.goal, "| Complete:", q.completed)
+            print("  " .. q.missionId .. " | " .. q.name)
+            print("  Zone: " .. tostring(q.zoneId) .. " | Diff: " .. tostring(q.difficulty))
+            print("  Progress: " .. q.progress .. "/" .. q.goal)
         else
             print("  (none)")
         end
     end,
 })
-
-QuestLeft:Button({
-    Name = "Debug Enemies (Console)",
-    Callback = function()
-        print("\n=== ENEMIES SCAN ===")
+DebugGroup:AddButton({
+    Text = "Debug Enemies (Console)",
+    Func = function()
+        print("\n=== ENEMIES ===")
         print("EnemiesManager:", EnemiesManager and "OK" or "MISSING")
         local enemies = IterateLiveEnemies()
-        print("Total live:", #enemies)
+        print("Live count:", #enemies)
         local char = LocalPlayer.Character
         local myHrp = char and char:FindFirstChild("HumanoidRootPart")
         for i, e in ipairs(enemies) do
-            if i > 25 then print("  ...(more)"); break end
+            if i > 25 then print("  ..."); break end
             local info = GetMobInfo(e.model)
             local dist = myHrp and math.floor((myHrp.Position - e.hrp.Position).Magnitude) or "?"
             print(string.format("  [%d] %s | diff=%s | %sm",
@@ -907,172 +784,133 @@ QuestLeft:Button({
     end,
 })
 
--- Right side: quest browser
-QuestRight:Header({ Name = "All OnGoing Missions" })
-local OnGoingSummaryLabel = QuestRight:Label({ Text = "Loading..." })
+local BrowserGroup = Tabs.Quest:AddRightGroupbox("All OnGoing Missions", "list")
+local OnGoingSummaryLabel = BrowserGroup:AddLabel("Loading...", true)
 
 -- ── EXTRAS TAB ──────────────────────────────────────────────
-local ExtrasLeft  = Tabs.Extras:Section({ Side="Left"  })
-local ExtrasRight = Tabs.Extras:Section({ Side="Right" })
-
-ExtrasLeft:Header({ Name = "Auto Champions" })
-ExtrasLeft:Toggle({
-    Name="Auto Champion Spin", Default=false,
-    Callback=function(v)
-        State.AutoChampSpin = v
-        if v then
-            local zoneId = ChampionSpinIdMap[State.ChampZone]
-            if zoneId then Actions.HiddenChampionSpin(zoneId) end
-        else
-            Actions.GachaStop("Champions"); task.wait(0.5)
-            local anyActive = State.AutoBanner
-            for _, g in ipairs(GachaData) do
-                if State.GachaEnabled[g.id] then anyActive=true; break end
-            end
-            if not anyActive then ShowSpinPopups() end
-        end
+local ChampGroup = Tabs.Extras:AddLeftGroupbox("Auto Champions ★", "star")
+ChampGroup:AddToggle("AutoChampSpin", { Text="Auto Champion Spin", Default=false })
+ChampGroup:AddDropdown("ChampZone", {
+    Values  = ChampionSpinDisplay,
+    Default = ChampionSpinDisplay[1] or "Skylands",
+    Text    = "Zone",
+})
+ChampGroup:AddButton({
+    Text = "Manual Spin",
+    Func = function()
+        local zoneId = ChampionSpinIdMap[Options.ChampZone.Value]
+        if zoneId then Actions.HiddenChampionSpin(zoneId) end
     end,
-}, "AutoChampSpin")
+})
+ChampGroup:AddButton({ Text="Force Stop", Func=function() Actions.GachaStop("Champions") end })
 
-ExtrasLeft:Dropdown({
-    Name="Champion Zone", Multi=false, Required=true,
-    Options=ChampionSpinDisplay, Default=1,
-    Callback=function(v)
-        State.ChampZone = v
-        if State.AutoChampSpin then
-            Actions.GachaStop("Champions"); task.wait(0.3)
-            local zoneId = ChampionSpinIdMap[v]
-            if zoneId then Actions.HiddenChampionSpin(zoneId) end
-        end
-    end,
-}, "ChampZone")
+local RankupGroup = Tabs.Extras:AddLeftGroupbox("Auto Rankup", "arrow-up")
+RankupGroup:AddToggle("AutoRankup", { Text="Auto Rankup Power", Default=false })
+RankupGroup:AddSlider("RankupDelay", { Text="Rankup Delay", Default=2, Min=0.5, Max=30, Rounding=1, Suffix="s" })
 
-ExtrasLeft:Button({ Name="Manual Champion Spin", Callback=function()
-    local zoneId = ChampionSpinIdMap[State.ChampZone]
-    if zoneId then Actions.HiddenChampionSpin(zoneId) end
-end })
-ExtrasLeft:Button({ Name="Force Stop Champions", Callback=function()
-    Actions.GachaStop("Champions")
-end })
-
-ExtrasLeft:Divider()
-ExtrasLeft:Header({ Name = "Auto Rankup" })
-ExtrasLeft:Toggle({ Name="Auto Rankup Power", Default=false, Callback=function(v) State.AutoRankup = v end }, "AutoRankup")
-ExtrasLeft:Slider({ Name="Rankup Delay", Default=2, Minimum=0.5, Maximum=30, Precision=1, Callback=function(v) State.RankupDelay = v end }, "RankupDelay")
-
-ExtrasRight:Header({ Name = "Auto Gacha (" .. #GachaData .. ")" })
+local GachaGroup = Tabs.Extras:AddRightGroupbox("Auto Gacha (" .. #GachaData .. ")", "gift")
+local gachaTogglesList = {}
 for _, gacha in ipairs(GachaData) do
+    local toggleName = "AutoGacha_" .. gacha.id
+    table.insert(gachaTogglesList, { toggleName=toggleName, gacha=gacha })
     local zoneText = gacha.requireZone
         and (" [" .. (ZoneDisplayNames[gacha.requireZone] or gacha.requireZone) .. "]") or ""
-    ExtrasRight:Toggle({
-        Name = "Auto " .. gacha.display .. zoneText,
+    GachaGroup:AddToggle(toggleName, {
+        Text = "Auto " .. gacha.display .. zoneText,
         Default = false,
-        Callback = function(v)
-            State.GachaEnabled[gacha.id] = v
-            if v then
-                Actions.HiddenSpin(gacha.id)
-            else
-                Actions.GachaStop(gacha.id); task.wait(0.5)
-                local anyActive = State.AutoChampSpin or State.AutoBanner
-                for _, g in ipairs(GachaData) do
-                    if State.GachaEnabled[g.id] then anyActive=true; break end
-                end
-                if not anyActive then ShowSpinPopups() end
-            end
-        end,
-    }, "Gacha_" .. gacha.id)
+    })
 end
-ExtrasRight:Divider()
-ExtrasRight:Button({ Name="Stop All Gacha", Callback=function()
-    for _, g in ipairs(GachaData) do Actions.GachaStop(g.id) end
-    Actions.GachaStop("Champions")
-end })
+GachaGroup:AddDivider()
+GachaGroup:AddButton({
+    Text = "Stop All Gacha",
+    Func = function()
+        for _, g in ipairs(GachaData) do Actions.GachaStop(g.id) end
+        Actions.GachaStop("Champions")
+    end,
+})
 
 -- ── SUMMON TAB ──────────────────────────────────────────────
-local SummonLeft  = Tabs.Summon:Section({ Side="Left"  })
-local SummonRight = Tabs.Summon:Section({ Side="Right" })
-
-SummonLeft:Header({ Name = "Auto Banner Summon" })
-SummonLeft:Toggle({
-    Name="Auto Banner Summon", Default=false,
-    Callback=function(v)
-        State.AutoBanner = v
-        if not v then
-            task.wait(0.5)
-            local anyActive = State.AutoChampSpin
-            for _, g in ipairs(GachaData) do
-                if State.GachaEnabled[g.id] then anyActive=true; break end
-            end
-            if not anyActive then ShowSpinPopups() end
-        end
+local BannerGroup = Tabs.Summon:AddLeftGroupbox("Auto Banner Summon", "gift")
+BannerGroup:AddToggle("AutoBanner", { Text="Auto Banner Summon", Default=false })
+BannerGroup:AddDropdown("BannerName", {
+    Values  = BannerData,
+    Default = BannerData[1] or "",
+    Text    = "Banner",
+})
+BannerGroup:AddDropdown("BannerCount", {
+    Values  = {"1", "10"},
+    Default = "10",
+    Text    = "Rolls per Summon",
+})
+BannerGroup:AddDropdown("BannerRollType", {
+    Values  = {"Normal", "Premium"},
+    Default = "Normal",
+    Text    = "Ticket Type",
+})
+BannerGroup:AddSlider("BannerDelay", { Text="Summon Delay", Default=5, Min=1, Max=60, Rounding=1, Suffix="s" })
+BannerGroup:AddButton({
+    Text = "Manual Summon",
+    Func = function()
+        local count = tonumber(Options.BannerCount.Value) or 1
+        Actions.HiddenBannerRoll(Options.BannerName.Value, count, Options.BannerRollType.Value)
     end,
-}, "AutoBanner")
+})
 
-SummonLeft:Dropdown({ Name="Banner",          Multi=false, Required=true, Options=#BannerData>0 and BannerData or {"(none)"}, Default=1, Callback=function(v) State.BannerName    = v end }, "BannerName")
-SummonLeft:Dropdown({ Name="Rolls per Summon",Multi=false, Required=true, Options={"1","10"},   Default=2,                     Callback=function(v) State.BannerCount   = tonumber(v) or 10 end }, "BannerCount")
-SummonLeft:Dropdown({ Name="Ticket Type",     Multi=false, Required=true, Options={"Normal","Premium"}, Default=1,             Callback=function(v) State.BannerRollType = v end }, "BannerRollType")
-SummonLeft:Slider({ Name="Summon Delay", Default=5, Minimum=1, Maximum=60, Precision=1, Callback=function(v) State.BannerDelay = v end }, "BannerDelay")
-SummonLeft:Button({ Name="Manual Summon", Callback=function()
-    Actions.HiddenBannerRoll(State.BannerName, State.BannerCount, State.BannerRollType)
-end })
-
-SummonRight:Header({ Name = "Available Banners" })
-for _, b in ipairs(BannerData) do SummonRight:Label({ Text="• "..b }) end
+local BannerInfoGroup = Tabs.Summon:AddRightGroupbox("Info", "info")
+BannerInfoGroup:AddLabel("Available Banners:", true)
+for _, b in ipairs(BannerData) do BannerInfoGroup:AddLabel("• " .. b, true) end
 
 -- ── TELEPORT TAB ────────────────────────────────────────────
-local TeleLeft  = Tabs.Teleport:Section({ Side="Left"  })
-local TeleRight = Tabs.Teleport:Section({ Side="Right" })
-TeleLeft:Header({ Name="Zones" })
-local half = math.ceil(#ZoneData / 2)
-for i, zone in ipairs(ZoneData) do
-    local sec = (i <= half) and TeleLeft or TeleRight
-    if i == half + 1 then TeleRight:Header({ Name="Zones (cont.)" }) end
-    sec:Button({
-        Name = zone.display,
-        Callback = function()
+local TeleportGroup = Tabs.Teleport:AddLeftGroupbox("Zones", "map-pin")
+for _, zone in ipairs(ZoneData) do
+    TeleportGroup:AddButton({
+        Text = "TP: " .. zone.display,
+        Func = function()
             Actions.Teleport(zone.id)
             invalidateTarget()
         end,
     })
 end
 
--- ── SETTINGS TAB ────────────────────────────────────────────
-MacLib:SetFolder("AnimeStars")
-Tabs.Settings:InsertConfigSection("Left")
+-- ── UI SETTINGS ─────────────────────────────────────────────
+local MenuGroup = Tabs["UI Settings"]:AddLeftGroupbox("Menu", "wrench")
+MenuGroup:AddToggle("KeybindMenuOpen", {
+    Default = Library.KeybindFrame.Visible,
+    Text = "Open Keybind Menu",
+    Callback = function(v) Library.KeybindFrame.Visible = v end,
+})
+MenuGroup:AddToggle("ShowCustomCursor", {
+    Text = "Custom Cursor",
+    Default = Library.ShowCustomCursor,
+    Callback = function(v) Library.ShowCustomCursor = v end,
+})
+MenuGroup:AddDropdown("NotificationSide", {
+    Values = {"Left", "Right"},
+    Default = "Right",
+    Text = "Notification Side",
+    Callback = function(v) Library:SetNotifySide(v) end,
+})
+MenuGroup:AddDivider()
+MenuGroup:AddLabel("Menu bind"):AddKeyPicker("MenuKeybind", {
+    Default = "RightShift",
+    NoUI = true,
+    Text = "Menu keybind",
+})
+MenuGroup:AddButton("Unload Script", function()
+    Library:Unload()
+end)
 
-local SettingsRight = Tabs.Settings:Section({ Side="Right" })
-SettingsRight:Header({ Name = "Script" })
-SettingsRight:Label({ Text = "Anime Stars v4.1" })
-SettingsRight:SubLabel({ Text = "Toggle UI: Right Shift" })
-SettingsRight:Divider()
-SettingsRight:Button({
-    Name = "Unload Script",
-    Callback = function()
-        Window:Dialog({
-            Title = "Unload Script",
-            Description = "Are you sure? All auto-features will stop.",
-            Buttons = {
-                { Name="Unload", Callback = function() task.wait(0.2); Window:Unload() end },
-                { Name="Cancel" },
-            },
-        })
-    end,
-})
-SettingsRight:Button({
-    Name = "Rejoin Server",
-    Callback = function()
-        game:GetService("TeleportService"):Teleport(game.PlaceId, LocalPlayer)
-    end,
-})
+Library.ToggleKeybind = Options.MenuKeybind
 
 -- ═══════════════════════════════════════════════════════════
 -- HEARTBEAT: POSITIONING
 -- ═══════════════════════════════════════════════════════════
 RunService.Heartbeat:Connect(function()
+    if Library.Unloaded then return end
     local char = LocalPlayer.Character; if not char then return end
     local myHrp = char:FindFirstChild("HumanoidRootPart"); if not myHrp then return end
 
-    if not (State.AutoAttack or State.AutoQuest) then
+    if not (Toggles.AutoAttack.Value or Toggles.AutoQuest.Value) then
         if myHrp.Anchored then myHrp.Anchored = false end; return
     end
     if not currentTarget or not currentTarget.Parent then
@@ -1090,8 +928,7 @@ RunService.Heartbeat:Connect(function()
     if myHum then myHum.PlatformStand = false end
 
     local targetPos, lookAt
-
-    if State.SmartGroup and currentGroup and #currentGroup > 1 then
+    if Toggles.SmartGroup.Value and currentGroup and #currentGroup > 1 then
         local livePos = {}
         for _, m in ipairs(currentGroup) do
             if m.mob and m.mob.Parent then
@@ -1128,113 +965,177 @@ RunService.Heartbeat:Connect(function()
     myHrp.AssemblyLinearVelocity  = Vector3.zero
     myHrp.AssemblyAngularVelocity = Vector3.zero
 
-    if State.UseAnchor then myHrp.Anchored = true
+    if Toggles.UseAnchor.Value then myHrp.Anchored = true
     elseif myHrp.Anchored then myHrp.Anchored = false end
 end)
+
+-- Invalidate target when filter/priority toggles change
+Toggles.PriorityMob:OnChanged(function() invalidateTarget() end)
+Toggles.FallbackAny:OnChanged(function() invalidateTarget() end)
+Toggles.SmartGroup:OnChanged(function() invalidateTarget() end)
 
 -- ═══════════════════════════════════════════════════════════
 -- ATTACK LOOP
 -- ═══════════════════════════════════════════════════════════
 task.spawn(function()
-    while true do
-        local shouldFarm = State.AutoAttack or State.AutoQuest
+    while task.wait() do
+        if Library.Unloaded then break end
+        local shouldFarm = Toggles.AutoAttack.Value or Toggles.AutoQuest.Value
         if not shouldFarm then
             currentTarget=nil; currentGroup=nil; currentGroupSize=0
-            task.wait(0.1); continue
-        end
+            task.wait(0.1)
+        else
+            local hero = GetCurrentHero()
 
-        local hero = GetCurrentHero()
+            if needNewTarget or not currentTarget or not currentTarget.Parent then
+                needNewTarget = false
+                local filter, ignoreRange = nil, false
 
-        if needNewTarget or not currentTarget or not currentTarget.Parent then
-            needNewTarget = false
-            local filter, ignoreRange = nil, false
+                if Toggles.PriorityMob.Value then
+                    local val = Options.SelectedMob.Value
+                    if type(val) == "table" then
+                        local hasAny = false
+                        for _, v in pairs(val) do if v then hasAny=true; break end end
+                        if hasAny then
+                            filter = { mobNames = val }
+                            ignoreRange = true
+                        end
+                    end
+                end
 
-            if State.PriorityMob and next(State.SelectedMob) then
-                filter      = { mobNames = State.SelectedMob }
-                ignoreRange = true
-            elseif State.AutoQuest and ActiveQuestFilter then
-                filter      = ActiveQuestFilter
-                ignoreRange = true
-            end
+                if not filter and Toggles.AutoQuest.Value and ActiveQuestFilter then
+                    filter = ActiveQuestFilter
+                    ignoreRange = true
+                end
 
-            local mob, group
-            if State.SmartGroup then
-                mob, group = GetMobGroup(filter, State.GroupRadius, ignoreRange)
-            else
-                mob = GetSingleTarget(filter, ignoreRange)
-            end
-
-            if not mob and State.FallbackAny and filter then
-                if State.SmartGroup then
-                    mob, group = GetMobGroup(nil, State.GroupRadius, false)
+                local mob, group
+                if Toggles.SmartGroup.Value then
+                    mob, group = GetMobGroup(filter, Options.GroupRadius.Value, ignoreRange)
                 else
-                    mob = GetSingleTarget(nil, false)
+                    mob = GetSingleTarget(filter, ignoreRange)
+                end
+
+                if not mob and Toggles.FallbackAny.Value and filter then
+                    if Toggles.SmartGroup.Value then
+                        mob, group = GetMobGroup(nil, Options.GroupRadius.Value, false)
+                    else
+                        mob = GetSingleTarget(nil, false)
+                    end
+                end
+
+                setCurrentTarget(mob)
+                currentGroup     = group
+                currentGroupSize = group and #group or 0
+                comboIndex       = 1
+            end
+
+            if currentTarget and hero ~= "" then
+                local hum = currentTarget:FindFirstChildOfClass("Humanoid")
+                if hum and hum.Health > 0 then
+                    Actions.M1(hero, comboIndex)
+                    comboIndex = comboIndex % 4 + 1
+                else
+                    invalidateTarget()
                 end
             end
 
-            setCurrentTarget(mob)
-            currentGroup     = group
-            currentGroupSize = group and #group or 0
-            comboIndex       = 1
+            task.wait(ATTACK_DELAY)
         end
-
-        if currentTarget and hero ~= "" then
-            local hum = currentTarget:FindFirstChildOfClass("Humanoid")
-            if hum and hum.Health > 0 then
-                Actions.M1(hero, comboIndex)
-                comboIndex = comboIndex % 4 + 1
-            else
-                invalidateTarget()
-            end
-        end
-
-        task.wait(ATTACK_DELAY)
     end
 end)
 
 -- ═══════════════════════════════════════════════════════════
--- SKILL / ULTIMATE / RANKUP / BANNER LOOPS
+-- SKILL / ULT / RANKUP / BANNER LOOPS
 -- ═══════════════════════════════════════════════════════════
-task.spawn(function() while true do
-    if State.AutoSkill    then Actions.CastSkill();    task.wait(State.SkillDelay)  else task.wait(0.5) end
+task.spawn(function() while task.wait() do
+    if Library.Unloaded then break end
+    if Toggles.AutoSkill.Value then Actions.CastSkill(); task.wait(Options.SkillDelay.Value)
+    else task.wait(0.5) end
 end end)
-task.spawn(function() while true do
-    if State.AutoUltimate then Actions.CastUltimate(); task.wait(State.UltDelay)    else task.wait(0.5) end
+task.spawn(function() while task.wait() do
+    if Library.Unloaded then break end
+    if Toggles.AutoUltimate.Value then Actions.CastUltimate(); task.wait(Options.UltDelay.Value)
+    else task.wait(0.5) end
 end end)
-task.spawn(function() while true do
-    if State.AutoRankup   then Actions.RankupPower();  task.wait(State.RankupDelay) else task.wait(0.5) end
+task.spawn(function() while task.wait() do
+    if Library.Unloaded then break end
+    if Toggles.AutoRankup.Value then Actions.RankupPower(); task.wait(Options.RankupDelay.Value)
+    else task.wait(0.5) end
 end end)
-task.spawn(function() while true do
-    if State.AutoBanner   then
-        Actions.HiddenBannerRoll(State.BannerName, State.BannerCount, State.BannerRollType)
-        task.wait(State.BannerDelay)
+task.spawn(function() while task.wait() do
+    if Library.Unloaded then break end
+    if Toggles.AutoBanner.Value then
+        local count = tonumber(Options.BannerCount.Value) or 10
+        Actions.HiddenBannerRoll(Options.BannerName.Value, count, Options.BannerRollType.Value)
+        task.wait(Options.BannerDelay.Value)
     else task.wait(1) end
 end end)
 
 -- ═══════════════════════════════════════════════════════════
--- GACHA / CHAMPION WATCHDOG
+-- CHAMPION + GACHA HANDLERS
 -- ═══════════════════════════════════════════════════════════
+Toggles.AutoChampSpin:OnChanged(function()
+    if Toggles.AutoChampSpin.Value then
+        local zoneId = ChampionSpinIdMap[Options.ChampZone.Value]
+        if zoneId then Actions.HiddenChampionSpin(zoneId) end
+    else
+        Actions.GachaStop("Champions")
+        task.wait(0.5)
+        local anyActive = Toggles.AutoBanner.Value
+        for _, g in ipairs(gachaTogglesList) do
+            if Toggles[g.toggleName].Value then anyActive=true; break end
+        end
+        if not anyActive then ShowSpinPopups() end
+    end
+end)
+
+Options.ChampZone:OnChanged(function()
+    if Toggles.AutoChampSpin.Value then
+        Actions.GachaStop("Champions"); task.wait(0.3)
+        local zoneId = ChampionSpinIdMap[Options.ChampZone.Value]
+        if zoneId then Actions.HiddenChampionSpin(zoneId) end
+    end
+end)
+
+for _, g in ipairs(gachaTogglesList) do
+    Toggles[g.toggleName]:OnChanged(function()
+        if Toggles[g.toggleName].Value then
+            Actions.HiddenSpin(g.gacha.id)
+        else
+            Actions.GachaStop(g.gacha.id); task.wait(0.5)
+            local anyActive = Toggles.AutoChampSpin.Value or Toggles.AutoBanner.Value
+            for _, g2 in ipairs(gachaTogglesList) do
+                if g2.toggleName ~= g.toggleName and Toggles[g2.toggleName].Value then
+                    anyActive = true; break
+                end
+            end
+            if not anyActive then ShowSpinPopups() end
+        end
+    end)
+end
+
+-- Watchdog (re-fire every 15s)
 task.spawn(function()
     while task.wait(15) do
-        if State.AutoChampSpin then
-            local zoneId = ChampionSpinIdMap[State.ChampZone]
+        if Library.Unloaded then break end
+        if Toggles.AutoChampSpin.Value then
+            local zoneId = ChampionSpinIdMap[Options.ChampZone.Value]
             if zoneId then Actions.ChampionSpin(zoneId) end
         end
-        for _, g in ipairs(GachaData) do
-            if State.GachaEnabled[g.id] then Actions.GachaSpin(g.id) end
+        for _, g in ipairs(gachaTogglesList) do
+            if Toggles[g.toggleName].Value then Actions.GachaSpin(g.gacha.id) end
         end
     end
 end)
 
--- ═══════════════════════════════════════════════════════════
--- POPUP WATCHDOG
--- ═══════════════════════════════════════════════════════════
+-- Popup hider
 task.spawn(function()
     while task.wait(0.25) do
-        local anyActive = State.AutoChampSpin or State.AutoBanner
+        if Library.Unloaded then break end
+        local anyActive = Toggles.AutoChampSpin.Value or Toggles.AutoBanner.Value
         if not anyActive then
-            for _, g in ipairs(GachaData) do
-                if State.GachaEnabled[g.id] then anyActive=true; break end
+            for _, g in ipairs(gachaTogglesList) do
+                if Toggles[g.toggleName].Value then anyActive=true; break end
             end
         end
         if anyActive then HideSpinPopups() end
@@ -1242,17 +1143,19 @@ task.spawn(function()
 end)
 
 -- ═══════════════════════════════════════════════════════════
--- MAIN QUEST + UI UPDATE LOOP
+-- QUEST + UI UPDATE LOOP
 -- ═══════════════════════════════════════════════════════════
 task.spawn(function()
     while task.wait(1.0) do
+        if Library.Unloaded then break end
+
         local newQuest = GetActiveQuest()
         ActiveQuest       = newQuest
         ActiveQuestFilter = BuildFilterFromQuest(newQuest)
 
         pcall(function()
             HeroLabel:SetText("Hero: " .. GetCurrentHero())
-            GroupLabel:SetText(State.SmartGroup and currentGroupSize > 1
+            GroupLabel:SetText(Toggles.SmartGroup.Value and currentGroupSize > 1
                 and ("Group Farm: " .. currentGroupSize .. " mobs")
                 or  "Group Farm: single target")
             if currentTarget and currentTarget.Parent then
@@ -1300,43 +1203,37 @@ task.spawn(function()
             end
         end)
 
-        if State.AutoQuest and State.AutoClaim and ActiveQuest and ActiveQuest.completed then
+        if Toggles.AutoQuest.Value and Toggles.AutoClaim.Value and ActiveQuest and ActiveQuest.completed then
             ClaimQuest(ActiveQuest)
-            Window:Notify({ Title="Auto Claim", Description="Claimed: "..ActiveQuest.name, Lifetime=3 })
+            Library:Notify({ Title="Auto Claim", Description="Claimed: "..ActiveQuest.name, Time=3 })
             invalidateTarget()
             task.wait(2)
-            continue
-        end
-
-        if State.AutoQuest and State.AutoTeleport
+        elseif Toggles.AutoQuest.Value and Toggles.AutoTeleport.Value
             and ActiveQuestFilter and ActiveQuestFilter.zoneId
-            and not State.PriorityMob
+            and not Toggles.PriorityMob.Value
         then
             if tick() - lastZoneTeleport > 8 then
                 local currentZone = GetPlayerCurrentZone()
                 local alreadyInZone = (currentZone == ActiveQuestFilter.zoneId)
-
                 local exactMatches = 0
                 for _, e in ipairs(IterateLiveEnemies()) do
                     if MatchesFilter(e.model, ActiveQuestFilter) then
                         exactMatches = exactMatches + 1
                     end
                 end
-
                 if exactMatches == 0 and not alreadyInZone then
                     local zoneName = ZoneDisplayNames[ActiveQuestFilter.zoneId] or ActiveQuestFilter.zoneId
                     Actions.Teleport(ActiveQuestFilter.zoneId)
                     lastZoneTeleport = tick()
                     invalidateTarget()
-                    Window:Notify({ Title="Auto Quest", Description="TP → "..zoneName, Lifetime=3 })
+                    Library:Notify({ Title="Auto Quest", Description="TP → "..zoneName, Time=3 })
                     task.wait(5)
-                    continue
                 end
             end
         end
 
-        -- Wrong difficulty auto-swap
-        if State.AutoQuest and ActiveQuestFilter and currentTarget and currentTarget.Parent then
+        -- Wrong-difficulty swap
+        if Toggles.AutoQuest.Value and ActiveQuestFilter and currentTarget and currentTarget.Parent then
             local info = GetMobInfo(currentTarget)
             if info.difficulty then
                 local actual = info.difficulty
@@ -1369,7 +1266,7 @@ LocalPlayer.CharacterAdded:Connect(function(char)
     invalidateTarget()
 end)
 
-Window.onUnloaded(function()
+Library:OnUnload(function()
     pcall(function()
         local char = LocalPlayer.Character
         if char then
@@ -1383,13 +1280,20 @@ Window.onUnloaded(function()
 end)
 
 -- ═══════════════════════════════════════════════════════════
--- STARTUP
+-- THEME + SAVE
 -- ═══════════════════════════════════════════════════════════
-Tabs.Main:Select()
-MacLib:LoadAutoLoadConfig()
+ThemeManager:SetLibrary(Library)
+SaveManager:SetLibrary(Library)
+SaveManager:IgnoreThemeSettings()
+SaveManager:SetIgnoreIndexes({ "MenuKeybind" })
+ThemeManager:SetFolder("AnimeStarsScript")
+SaveManager:SetFolder("AnimeStarsScript/configs")
+SaveManager:BuildConfigSection(Tabs["UI Settings"])
+ThemeManager:ApplyToTab(Tabs["UI Settings"])
+SaveManager:LoadAutoloadConfig()
 
-Window:Notify({
-    Title       = "Anime Stars v4.1",
-    Description = "Loaded with EnemiesManager integration",
-    Lifetime    = 5,
+Library:Notify({
+    Title = "Anime Stars v5.0",
+    Description = string.format("%d zones | %d gachas | %d banners", #ZoneData, #GachaData, #BannerData),
+    Time = 5,
 })

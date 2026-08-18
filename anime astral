@@ -1,1 +1,810 @@
+-- ═══════════════════════════════════════════════════════════
+-- ANIME ASTRAL v1.1 - Auto-Update + Concurrent-Safe
+-- ═══════════════════════════════════════════════════════════
 
+-- ═══════════════════════════════════════════════════════════
+-- AUTO-UPDATE SYSTEM (checks GitHub for newer version)
+-- ═══════════════════════════════════════════════════════════
+local SCRIPT_VERSION = "1.1"
+local SCRIPT_URL     = "https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/anime_astral.lua"
+local VERSION_URL    = "https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/version.txt"
+
+-- Prevent duplicate execution
+if getgenv().AnimeAstral_Loaded then
+    warn("[Anime Astral] Already loaded — unload first")
+    return
+end
+getgenv().AnimeAstral_Loaded = true
+
+-- Check for updates (non-blocking)
+task.spawn(function()
+    local ok, remoteVersion = pcall(function()
+        return game:HttpGet(VERSION_URL):gsub("%s+", "")
+    end)
+    if ok and remoteVersion and remoteVersion ~= "" and remoteVersion ~= SCRIPT_VERSION then
+        pcall(function()
+            game:GetService("StarterGui"):SetCore("SendNotification", {
+                Title    = "Anime Astral Update",
+                Text     = "New version " .. remoteVersion .. " available (you have " .. SCRIPT_VERSION .. ")",
+                Duration = 8,
+            })
+        end)
+        print("[Anime Astral] Update available: " .. remoteVersion)
+    end
+end)
+
+-- ═══════════════════════════════════════════════════════════
+-- LOAD UI LIBS
+-- ═══════════════════════════════════════════════════════════
+local repo = "https://raw.githubusercontent.com/deividcomsono/Obsidian/main/"
+local Library      = loadstring(game:HttpGet(repo .. "Library.lua"))()
+local ThemeManager = loadstring(game:HttpGet(repo .. "addons/ThemeManager.lua"))()
+local SaveManager  = loadstring(game:HttpGet(repo .. "addons/SaveManager.lua"))()
+
+local Options = Library.Options
+local Toggles = Library.Toggles
+
+Library.ForceCheckbox = false
+Library.ShowToggleFrameInKeybinds = true
+
+local Players           = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService        = game:GetService("RunService")
+local VirtualUser       = game:GetService("VirtualUser")
+
+local LocalPlayer = Players.LocalPlayer
+local Lib         = ReplicatedStorage:WaitForChild("SimpleWorld"):WaitForChild("Library")
+
+-- ═══════════════════════════════════════════════════════════
+-- ERROR-ISOLATED CONTROLLER LOADER
+-- ═══════════════════════════════════════════════════════════
+local function tryReq(path)
+    local ok, mod = pcall(require, path)
+    if not ok then
+        warn("[AA] Failed to load:", path.Name or tostring(path), "|", mod)
+        return nil
+    end
+    return mod
+end
+
+local Client, Config, Network = Lib.Client, Lib.Config, Lib.Network
+
+local Controllers = {
+    AutoClick    = tryReq(Client.AutoClickController),
+    Range        = tryReq(Client.RangeController),
+    Codes        = tryReq(Client.CodesController),
+    PetRoll      = tryReq(Client.PetRollController),
+    Gacha        = tryReq(Client.GachaController),
+    Raid         = tryReq(Client.RaidController),
+    BossRush     = tryReq(Client.BossRushController),
+    Settings     = tryReq(Client.SettingsController),
+    Rewards      = tryReq(Client.RewardsController),
+    AntiAfk      = tryReq(Client.AntiAfkController),
+    World        = tryReq(Client.WorldController),
+    Teleport     = tryReq(Client.TeleportController),
+}
+
+local Configs = {
+    World  = tryReq(Config.WorldConfig),
+    Eggs   = tryReq(Config.EggsData),
+    Gacha  = tryReq(Config.GachaConfig),
+    Raid   = tryReq(Config.RaidConfig),
+}
+
+local GetPlayerData = Network.Functions:FindFirstChild("GetPlayerData")
+
+-- ═══════════════════════════════════════════════════════════
+-- SAFE CALL WRAPPER (isolates errors)
+-- ═══════════════════════════════════════════════════════════
+local function safeCall(fnDesc, fn, ...)
+    if type(fn) ~= "function" then return nil end
+    local ok, result = pcall(fn, ...)
+    if not ok then
+        warn("[AA] " .. fnDesc .. " failed: " .. tostring(result))
+    end
+    return ok and result or nil
+end
+
+-- ═══════════════════════════════════════════════════════════
+-- CACHED DATA GETTER (prevents remote spam)
+-- ═══════════════════════════════════════════════════════════
+local _dataCache = { data = nil, time = 0 }
+local DATA_CACHE_TTL = 1.5  -- seconds
+
+local function GetData(forceFresh)
+    if not GetPlayerData then return nil end
+    local now = tick()
+    if not forceFresh and _dataCache.data and (now - _dataCache.time) < DATA_CACHE_TTL then
+        return _dataCache.data
+    end
+    local ok, data = pcall(function() return GetPlayerData:InvokeServer() end)
+    if ok then
+        _dataCache.data = data
+        _dataCache.time = now
+        return data
+    end
+    return _dataCache.data  -- fallback to stale
+end
+
+local function GetSettings()
+    local data = GetData()
+    return (data and data.Settings) or {}
+end
+
+-- ═══════════════════════════════════════════════════════════
+-- TASK MANAGER (all loops registered here for cleanup)
+-- ═══════════════════════════════════════════════════════════
+local TaskManager = {
+    threads = {},
+    connections = {},
+}
+
+function TaskManager:AddLoop(name, fn)
+    if self.threads[name] then return end
+    self.threads[name] = task.spawn(function()
+        while not Library.Unloaded do
+            local ok, err = pcall(fn)
+            if not ok then
+                warn("[AA:" .. name .. "] loop error: " .. tostring(err))
+                task.wait(1)  -- backoff on error
+            end
+        end
+    end)
+end
+
+function TaskManager:AddConnection(conn)
+    table.insert(self.connections, conn)
+end
+
+function TaskManager:CleanupAll()
+    for _, conn in ipairs(self.connections) do
+        pcall(function() conn:Disconnect() end)
+    end
+    self.connections = {}
+    -- Threads auto-die when Library.Unloaded checked
+end
+
+-- ═══════════════════════════════════════════════════════════
+-- RATE LIMITER (prevents remote spam)
+-- ═══════════════════════════════════════════════════════════
+local RateLimiter = {}
+RateLimiter.__index = RateLimiter
+
+function RateLimiter.new(cooldownSec)
+    return setmetatable({ cooldown = cooldownSec, lastCall = 0 }, RateLimiter)
+end
+
+function RateLimiter:Try()
+    local now = tick()
+    if now - self.lastCall >= self.cooldown then
+        self.lastCall = now
+        return true
+    end
+    return false
+end
+
+-- ═══════════════════════════════════════════════════════════
+-- ANTI-AFK
+-- ═══════════════════════════════════════════════════════════
+TaskManager:AddConnection(LocalPlayer.Idled:Connect(function()
+    VirtualUser:CaptureController()
+    VirtualUser:ClickButton2(Vector2.new())
+end))
+
+-- ═══════════════════════════════════════════════════════════
+-- DATA LISTS
+-- ═══════════════════════════════════════════════════════════
+local function BuildWorldList()
+    local list = {}
+    if Configs.World and Configs.World.GetAllWorlds then
+        local ok, worlds = pcall(Configs.World.GetAllWorlds)
+        if ok and type(worlds) == "table" then
+            for id, w in pairs(worlds) do
+                if type(w) == "table" then
+                    table.insert(list, { id=id, name=w.Name or w.DisplayName or tostring(id) })
+                end
+            end
+        end
+    end
+    table.sort(list, function(a, b) return tostring(a.id) < tostring(b.id) end)
+    return list
+end
+
+local function BuildRaidList()
+    local list = {}
+    if Configs.Raid and Configs.Raid.GetAllRaids then
+        local ok, raids = pcall(Configs.Raid.GetAllRaids)
+        if ok and type(raids) == "table" then
+            for id, r in pairs(raids) do
+                if type(r) == "table" then
+                    table.insert(list, { id=id, name=r.Name or r.DisplayName or tostring(id) })
+                end
+            end
+        end
+    end
+    return list
+end
+
+local function BuildEggList()
+    local list = {}
+    if type(Configs.Eggs) == "table" then
+        for worldKey, worldEggs in pairs(Configs.Eggs) do
+            if type(worldEggs) == "table" then
+                for eggKey, egg in pairs(worldEggs) do
+                    if type(egg) == "table" then
+                        table.insert(list, {
+                            key = eggKey,
+                            world = worldKey,
+                            name = egg.Name or egg.DisplayName or eggKey,
+                        })
+                    end
+                end
+            end
+        end
+    end
+    table.sort(list, function(a, b) return a.name < b.name end)
+    return list
+end
+
+local WorldData = BuildWorldList()
+local RaidData  = BuildRaidList()
+local EggData   = BuildEggList()
+
+print(string.format("[AA v%s] Loaded: %d worlds | %d raids | %d eggs",
+    SCRIPT_VERSION, #WorldData, #RaidData, #EggData))
+
+-- ═══════════════════════════════════════════════════════════
+-- CONTROLLER WRAPPERS (safe + rate-limited)
+-- ═══════════════════════════════════════════════════════════
+local AutoActions = {}
+
+function AutoActions.SetAutoClick(enable)
+    local c = Controllers.AutoClick
+    if not c then return end
+    local isActive = safeCall("IsAutoClickActive", c.IsAutoClickActive) == true
+    if enable ~= isActive then
+        safeCall("AutoClick.Toggle", c.Toggle)
+    end
+end
+
+function AutoActions.SetRange(enable)
+    local c = Controllers.Range
+    if not c then return end
+    if c.SetActive then
+        safeCall("Range.SetActive", c.SetActive, enable)
+    elseif c.Toggle and c.IsActive then
+        local isActive = safeCall("Range.IsActive", c.IsActive) == true
+        if enable ~= isActive then
+            safeCall("Range.Toggle", c.Toggle)
+        end
+    end
+end
+
+function AutoActions.SetSetting(key, value)
+    if Controllers.Settings and Controllers.Settings.SetSetting then
+        safeCall("SetSetting:" .. key, Controllers.Settings.SetSetting, key, value)
+    end
+end
+
+function AutoActions.StartAutoHatch(eggKey)
+    local c = Controllers.PetRoll
+    if not c then return end
+    if eggKey and c.SetCurrentEggKey then
+        safeCall("SetCurrentEggKey", c.SetCurrentEggKey, eggKey)
+    end
+    safeCall("StartAutoOpen", c.StartAutoOpen)
+end
+
+function AutoActions.StopAutoHatch()
+    if Controllers.PetRoll then
+        safeCall("StopAutoOpen", Controllers.PetRoll.StopAutoOpen)
+    end
+end
+
+function AutoActions.SingleHatch()
+    if Controllers.PetRoll and Controllers.PetRoll.OpenEgg then
+        safeCall("OpenEgg", Controllers.PetRoll.OpenEgg)
+    end
+end
+
+function AutoActions.StartAutoGacha()
+    if Controllers.Gacha then
+        safeCall("StartAutoRoll", Controllers.Gacha.StartAutoRoll)
+    end
+end
+
+function AutoActions.StopAutoGacha()
+    if Controllers.Gacha then
+        safeCall("StopAutoRoll", Controllers.Gacha.StopAutoRoll)
+    end
+end
+
+function AutoActions.SingleGacha()
+    if Controllers.Gacha and Controllers.Gacha.FireAndAwaitRoll then
+        safeCall("FireAndAwaitRoll", Controllers.Gacha.FireAndAwaitRoll)
+    end
+end
+
+function AutoActions.SetAutoRaidStart(v)
+    if Controllers.Raid and Controllers.Raid.SetAutoStart then
+        safeCall("SetAutoStart", Controllers.Raid.SetAutoStart, v)
+    end
+end
+function AutoActions.SetAutoRaidArise(v)
+    if Controllers.Raid and Controllers.Raid.SetAutoArise then
+        safeCall("SetAutoArise", Controllers.Raid.SetAutoArise, v)
+    end
+end
+function AutoActions.SetAutoBossRush(v)
+    if Controllers.BossRush and Controllers.BossRush.SetAutoStart then
+        safeCall("BossRush.SetAutoStart", Controllers.BossRush.SetAutoStart, v)
+    end
+end
+function AutoActions.SetAutoBossRushFinger(v)
+    if Controllers.BossRush and Controllers.BossRush.SetAutoCollectFinger then
+        safeCall("SetAutoCollectFinger", Controllers.BossRush.SetAutoCollectFinger, v)
+    end
+end
+
+function AutoActions.RedeemCode(code)
+    if Controllers.Codes and Controllers.Codes.Redeem then
+        return safeCall("Redeem", Controllers.Codes.Redeem, code)
+    end
+end
+
+function AutoActions.ClaimAllRewards()
+    local r = Controllers.Rewards
+    if not r then return end
+    if r.ClaimAll              then safeCall("ClaimAll", r.ClaimAll) end
+    if r.ClaimAllDailyRewards  then safeCall("ClaimAllDailyRewards", r.ClaimAllDailyRewards) end
+    if r.ClaimAllTimeRewards   then safeCall("ClaimAllTimeRewards", r.ClaimAllTimeRewards) end
+end
+
+function AutoActions.AntiAfkPulse()
+    if Controllers.AntiAfk and Controllers.AntiAfk.Pulse then
+        safeCall("AntiAfk.Pulse", Controllers.AntiAfk.Pulse)
+    end
+end
+
+-- ═══════════════════════════════════════════════════════════
+-- WINDOW
+-- ═══════════════════════════════════════════════════════════
+local Window = Library:CreateWindow({
+    Title  = "Anime Astral",
+    Footer = "v" .. SCRIPT_VERSION,
+    NotifySide = "Right",
+    ShowCustomCursor = true,
+})
+
+local Tabs = {
+    Main     = Window:AddTab("Main", "user"),
+    Farm     = Window:AddTab("Auto Farm", "swords"),
+    Rolling  = Window:AddTab("Auto Rolling", "dices"),
+    Raids    = Window:AddTab("Auto Raids", "shield"),
+    Rewards  = Window:AddTab("Auto Rewards", "gift"),
+    Codes    = Window:AddTab("Codes", "ticket"),
+    Teleport = Window:AddTab("Teleports", "map"),
+    Debug    = Window:AddTab("Debug", "bug"),
+    ["UI Settings"] = Window:AddTab("UI Settings", "settings"),
+}
+
+-- ═══════════════════════════════════════════════════════════
+-- MAIN TAB
+-- ═══════════════════════════════════════════════════════════
+local InfoGroup = Tabs.Main:AddLeftGroupbox("Status", "info")
+InfoGroup:AddLabel("Anime Astral v" .. SCRIPT_VERSION, true)
+InfoGroup:AddLabel(string.format("Loaded: %d worlds | %d raids | %d eggs",
+    #WorldData, #RaidData, #EggData), true)
+
+local StatusLabels = {
+    world      = InfoGroup:AddLabel("Current World: -", true),
+    level      = InfoGroup:AddLabel("Level: -", true),
+    power      = InfoGroup:AddLabel("Power: -", true),
+    yen        = InfoGroup:AddLabel("Yen: -", true),
+    autoClick  = InfoGroup:AddLabel("Auto Click: -", true),
+    range      = InfoGroup:AddLabel("Range: -", true),
+    activeTogs = InfoGroup:AddLabel("Active Toggles: 0", true),
+}
+
+local ServerGroup = Tabs.Main:AddRightGroupbox("Server", "server")
+ServerGroup:AddButton({
+    Text = "Rejoin Server",
+    Func = function()
+        game:GetService("TeleportService"):Teleport(game.PlaceId, LocalPlayer)
+    end,
+})
+ServerGroup:AddButton({
+    Text = "Check for Update",
+    Func = function()
+        task.spawn(function()
+            local ok, remoteVersion = pcall(function()
+                return game:HttpGet(VERSION_URL):gsub("%s+", "")
+            end)
+            if ok and remoteVersion then
+                if remoteVersion == SCRIPT_VERSION then
+                    Library:Notify({ Title="Update", Description="You're up to date! (v" .. SCRIPT_VERSION .. ")", Time=3 })
+                else
+                    Library:Notify({ Title="Update Available", Description="v" .. remoteVersion .. " available", Time=5 })
+                end
+            else
+                Library:Notify({ Title="Update", Description="Failed to check", Time=3 })
+            end
+        end)
+    end,
+})
+
+-- ═══════════════════════════════════════════════════════════
+-- AUTO FARM TAB
+-- ═══════════════════════════════════════════════════════════
+local FarmGroup = Tabs.Farm:AddLeftGroupbox("Auto Farm (Built-in)", "swords")
+FarmGroup:AddToggle("AutoClick", {
+    Text = "Auto Click",
+    Default = false,
+    Callback = function(v) AutoActions.SetAutoClick(v) end,
+})
+FarmGroup:AddToggle("RangeMode", {
+    Text = "Range Mode",
+    Default = false,
+    Callback = function(v) AutoActions.SetRange(v) end,
+})
+
+local SettingsGroup = Tabs.Farm:AddRightGroupbox("Player Settings", "settings")
+local settingsToggles = {
+    { key="AntiAfk",                text="Anti-AFK (in-game)" },
+    { key="AutoRankUp",             text="Auto Rank Up" },
+    { key="AutoClaimAchievements",  text="Auto Claim Achievements" },
+    { key="AutoClaimRewards",       text="Auto Claim Rewards" },
+    { key="AutoClaimGlobalQuests",  text="Auto Claim Global Quests" },
+    { key="AutoRun",                text="Auto Run" },
+}
+for _, s in ipairs(settingsToggles) do
+    SettingsGroup:AddToggle("Setting_" .. s.key, {
+        Text = s.text,
+        Default = false,
+        Callback = function(v) AutoActions.SetSetting(s.key, v) end,
+    })
+end
+
+-- ═══════════════════════════════════════════════════════════
+-- AUTO ROLLING TAB
+-- ═══════════════════════════════════════════════════════════
+local EggGroup = Tabs.Rolling:AddLeftGroupbox("Auto Egg Hatch", "egg")
+
+local eggDisplayNames = {}
+local eggKeyByDisplay = {}
+for _, e in ipairs(EggData) do
+    local display = "[" .. e.world .. "] " .. e.name
+    table.insert(eggDisplayNames, display)
+    eggKeyByDisplay[display] = e.key
+end
+if #eggDisplayNames == 0 then table.insert(eggDisplayNames, "(none)") end
+
+EggGroup:AddDropdown("SelectedEgg", {
+    Values = eggDisplayNames,
+    Default = eggDisplayNames[1],
+    Text = "Egg to hatch",
+    Searchable = true,
+})
+
+EggGroup:AddToggle("AutoHatch", {
+    Text = "Auto Hatch",
+    Default = false,
+    Callback = function(v)
+        if v then
+            local eggKey = eggKeyByDisplay[Options.SelectedEgg.Value]
+            AutoActions.StartAutoHatch(eggKey)
+        else
+            AutoActions.StopAutoHatch()
+        end
+    end,
+})
+
+EggGroup:AddButton({
+    Text = "Hatch Once",
+    Func = AutoActions.SingleHatch,
+})
+
+local GachaGroup = Tabs.Rolling:AddRightGroupbox("Auto Gacha Roll", "dices")
+GachaGroup:AddToggle("AutoGacha", {
+    Text = "Auto Gacha Roll",
+    Default = false,
+    Callback = function(v)
+        if v then AutoActions.StartAutoGacha()
+        else AutoActions.StopAutoGacha() end
+    end,
+})
+GachaGroup:AddButton({
+    Text = "Roll Once",
+    Func = AutoActions.SingleGacha,
+})
+
+-- ═══════════════════════════════════════════════════════════
+-- AUTO RAIDS TAB
+-- ═══════════════════════════════════════════════════════════
+local RaidGroup = Tabs.Raids:AddLeftGroupbox("Auto Raids", "shield")
+RaidGroup:AddToggle("AutoRaidStart", {
+    Text = "Auto Start Raid",
+    Default = false,
+    Callback = AutoActions.SetAutoRaidStart,
+})
+RaidGroup:AddToggle("AutoRaidArise", {
+    Text = "Auto Arise",
+    Default = false,
+    Callback = AutoActions.SetAutoRaidArise,
+})
+
+local BossRushGroup = Tabs.Raids:AddRightGroupbox("Boss Rush", "swords")
+BossRushGroup:AddToggle("BossRushAutoStart", {
+    Text = "Auto Start Boss Rush",
+    Default = false,
+    Callback = AutoActions.SetAutoBossRush,
+})
+BossRushGroup:AddToggle("BossRushAutoFinger", {
+    Text = "Auto Collect Finger",
+    Default = false,
+    Callback = AutoActions.SetAutoBossRushFinger,
+})
+
+local RaidListGroup = Tabs.Raids:AddLeftGroupbox("Raid List", "list")
+for _, r in ipairs(RaidData) do
+    RaidListGroup:AddLabel("• " .. r.name .. " (" .. r.id .. ")", true)
+end
+
+-- ═══════════════════════════════════════════════════════════
+-- AUTO REWARDS TAB
+-- ═══════════════════════════════════════════════════════════
+local RewardsGroup = Tabs.Rewards:AddLeftGroupbox("Manual Claim", "gift")
+RewardsGroup:AddButton({
+    Text = "Claim ALL Rewards",
+    Func = function()
+        AutoActions.ClaimAllRewards()
+        Library:Notify({ Title="Rewards", Description="Claimed all", Time=2 })
+    end,
+})
+
+local AutoRewardsGroup = Tabs.Rewards:AddRightGroupbox("Auto Loop", "clock")
+AutoRewardsGroup:AddToggle("AutoClaimLoop", {
+    Text = "Auto-Claim Loop",
+    Default = false,
+})
+AutoRewardsGroup:AddSlider("AutoClaimInterval", {
+    Text = "Interval",
+    Default = 60, Min = 15, Max = 600, Rounding = 0, Suffix = "s",
+})
+
+-- ═══════════════════════════════════════════════════════════
+-- CODES TAB
+-- ═══════════════════════════════════════════════════════════
+local CodesGroup = Tabs.Codes:AddLeftGroupbox("Redeem Codes", "ticket")
+
+CodesGroup:AddInput("CodeInput", {
+    Default = "", Text = "Code", Placeholder = "Enter code",
+})
+CodesGroup:AddButton({
+    Text = "Redeem",
+    Func = function()
+        local code = Options.CodeInput.Value
+        if code and code ~= "" then
+            AutoActions.RedeemCode(code)
+            Library:Notify({ Title="Code", Description="Sent: " .. code, Time=3 })
+        end
+    end,
+})
+
+CodesGroup:AddDivider()
+CodesGroup:AddInput("BulkCodes", {
+    Default = "", Text = "Bulk (comma-separated)",
+    Placeholder = "code1,code2,code3",
+})
+CodesGroup:AddButton({
+    Text = "Redeem All",
+    Func = function()
+        local bulk = Options.BulkCodes.Value
+        if not bulk or bulk == "" then return end
+        task.spawn(function()  -- run async so UI doesn't block
+            local count = 0
+            for code in bulk:gmatch("[^,%s]+") do
+                AutoActions.RedeemCode(code)
+                count = count + 1
+                task.wait(0.5)
+            end
+            Library:Notify({ Title="Codes", Description="Redeemed " .. count, Time=3 })
+        end)
+    end,
+})
+
+-- ═══════════════════════════════════════════════════════════
+-- TELEPORT TAB
+-- ═══════════════════════════════════════════════════════════
+local TpGroup = Tabs.Teleport:AddLeftGroupbox("Worlds", "map-pin")
+for _, w in ipairs(WorldData) do
+    TpGroup:AddButton({
+        Text = "TP: " .. w.name,
+        Func = function()
+            local ok = false
+            pcall(function()
+                local proxy = require(Lib.Network.BridgeEventProxy)
+                for _, bridgeName in ipairs({"SetWorld", "GoToWorld", "TeleportWorld", "ChangeWorld"}) do
+                    local bridge = proxy(bridgeName)
+                    if bridge and bridge.Fire then
+                        bridge:Fire(w.id)
+                        ok = true
+                        break
+                    end
+                end
+            end)
+            Library:Notify({
+                Title = "Teleport",
+                Description = ok and ("→ " .. w.name) or "Failed",
+                Time = 2,
+            })
+        end,
+    })
+end
+
+-- ═══════════════════════════════════════════════════════════
+-- DEBUG TAB
+-- ═══════════════════════════════════════════════════════════
+local DebugGroup = Tabs.Debug:AddLeftGroupbox("Debug", "bug")
+DebugGroup:AddButton({
+    Text = "Print Player Data",
+    Func = function()
+        local d = GetData(true)
+        if not d then print("No data"); return end
+        print("\n=== PLAYER DATA ===")
+        print("  World:", d.CurrentWorld, "Level:", d.Level, "Rank:", d.Rank)
+        print("  Power:", d.Power, "Yen:", d.Yen)
+        print("  AutoClick:", d.AutoClickState, "Range:", d.RangeState)
+    end,
+})
+DebugGroup:AddButton({
+    Text = "Print Settings",
+    Func = function()
+        print("\n=== SETTINGS ===")
+        for k, v in pairs(GetSettings()) do
+            print("  " .. k .. " = " .. tostring(v))
+        end
+    end,
+})
+DebugGroup:AddButton({
+    Text = "Print Controllers Loaded",
+    Func = function()
+        print("\n=== CONTROLLERS ===")
+        for k, v in pairs(Controllers) do
+            print("  " .. k .. ": " .. (v and "OK" or "MISSING"))
+        end
+    end,
+})
+
+-- ═══════════════════════════════════════════════════════════
+-- UI SETTINGS
+-- ═══════════════════════════════════════════════════════════
+local MenuGroup = Tabs["UI Settings"]:AddLeftGroupbox("Menu", "wrench")
+MenuGroup:AddToggle("KeybindMenuOpen", {
+    Default = Library.KeybindFrame.Visible,
+    Text = "Open Keybind Menu",
+    Callback = function(v) Library.KeybindFrame.Visible = v end,
+})
+MenuGroup:AddDropdown("NotificationSide", {
+    Values = {"Left","Right"}, Default = "Right", Text = "Notification Side",
+    Callback = function(v) Library:SetNotifySide(v) end,
+})
+MenuGroup:AddDivider()
+MenuGroup:AddLabel("Menu bind"):AddKeyPicker("MenuKeybind", {
+    Default="RightShift", NoUI=true, Text="Menu keybind"
+})
+MenuGroup:AddButton("Unload Script", function() Library:Unload() end)
+Library.ToggleKeybind = Options.MenuKeybind
+
+-- ═══════════════════════════════════════════════════════════
+-- BACKGROUND LOOPS (all managed by TaskManager)
+-- ═══════════════════════════════════════════════════════════
+
+-- UI update loop (fast, no remote calls — uses cache)
+TaskManager:AddLoop("UIUpdate", function()
+    task.wait(1.5)
+    local d = GetData()  -- cached, cheap
+    if d then
+        pcall(function()
+            StatusLabels.world:SetText("Current World: " .. tostring(d.CurrentWorld or "?"))
+            StatusLabels.level:SetText("Level: " .. tostring(d.Level or "?") .. " | Rank: " .. tostring(d.Rank or "?"))
+            StatusLabels.power:SetText("Power: " .. string.format("%.2e", tonumber(d.Power) or 0))
+            StatusLabels.yen:SetText("Yen: " .. string.format("%.2e", tonumber(d.Yen) or 0))
+            StatusLabels.autoClick:SetText("Auto Click: " .. tostring(d.AutoClickState))
+            StatusLabels.range:SetText("Range: " .. tostring(d.RangeState))
+
+            -- Count active toggles
+            local count = 0
+            for name, tog in pairs(Toggles) do
+                if tog.Value == true then count = count + 1 end
+            end
+            StatusLabels.activeTogs:SetText("Active Toggles: " .. count)
+        end)
+    end
+end)
+
+-- Auto claim loop (respects user interval)
+TaskManager:AddLoop("AutoClaim", function()
+    task.wait(5)  -- check every 5s
+    if Toggles.AutoClaimLoop and Toggles.AutoClaimLoop.Value then
+        local interval = Options.AutoClaimInterval and Options.AutoClaimInterval.Value or 60
+        AutoActions.ClaimAllRewards()
+        task.wait(interval)
+    end
+end)
+
+-- Anti-AFK pulse (in addition to Idled connection)
+TaskManager:AddLoop("AntiAfkPulse", function()
+    task.wait(60)
+    AutoActions.AntiAfkPulse()
+end)
+
+-- Watchdog: verify built-in toggles are still on
+-- (in case game auto-disables them on world change, etc.)
+TaskManager:AddLoop("ToggleWatchdog", function()
+    task.wait(10)
+    local d = GetData()
+    if not d then return end
+
+    -- Re-apply auto click if toggle is on but state is off
+    if Toggles.AutoClick and Toggles.AutoClick.Value and not d.AutoClickState then
+        AutoActions.SetAutoClick(true)
+    end
+
+    -- Re-apply range if toggle is on but state is off
+    if Toggles.RangeMode and Toggles.RangeMode.Value and not d.RangeState then
+        AutoActions.SetRange(true)
+    end
+
+    -- Re-apply settings that user has toggled
+    for _, s in ipairs(settingsToggles) do
+        local userToggle = Toggles["Setting_" .. s.key]
+        if userToggle and userToggle.Value then
+            local gameSetting = (d.Settings or {})[s.key]
+            if gameSetting ~= userToggle.Value then
+                AutoActions.SetSetting(s.key, userToggle.Value)
+            end
+        end
+    end
+end)
+
+-- ═══════════════════════════════════════════════════════════
+-- UNLOAD CLEANUP
+-- ═══════════════════════════════════════════════════════════
+Library:OnUnload(function()
+    getgenv().AnimeAstral_Loaded = nil
+    TaskManager:CleanupAll()
+
+    -- Stop all auto features cleanly
+    pcall(AutoActions.StopAutoHatch)
+    pcall(AutoActions.StopAutoGacha)
+
+    -- Turn off in-game auto toggles that we enabled
+    if Toggles.AutoClick and Toggles.AutoClick.Value then
+        pcall(AutoActions.SetAutoClick, false)
+    end
+    if Toggles.RangeMode and Toggles.RangeMode.Value then
+        pcall(AutoActions.SetRange, false)
+    end
+
+    print("[AA] Cleanly unloaded")
+end)
+
+-- ═══════════════════════════════════════════════════════════
+-- SAVE/THEME
+-- ═══════════════════════════════════════════════════════════
+ThemeManager:SetLibrary(Library)
+SaveManager:SetLibrary(Library)
+SaveManager:IgnoreThemeSettings()
+SaveManager:SetIgnoreIndexes({ "MenuKeybind" })
+ThemeManager:SetFolder("AnimeAstral")
+SaveManager:SetFolder("AnimeAstral/configs")
+SaveManager:BuildConfigSection(Tabs["UI Settings"])
+ThemeManager:ApplyToTab(Tabs["UI Settings"])
+SaveManager:LoadAutoloadConfig()
+
+Library:Notify({
+    Title = "Anime Astral v" .. SCRIPT_VERSION,
+    Description = "Loaded successfully!",
+    Time = 5,
+})
